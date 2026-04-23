@@ -4,11 +4,8 @@ __pycache__/
 .DS_Store
 .env
 
-# ham parquet cache'leri — DB'ye yansıdığı için git'te tutmak gerekmiyor
-data_live/ohlcv/*.parquet
-data_live/tech/*.parquet
-data_live/sentiment/*.parquet
-data_live/macro/*.parquet
+# Parquet cache'leri git'te tutuluyor (cloud inference için gerekli "seed" veri)
+# Büyüyebilecekleri için düşük priority — gerekirse Git LFS'e geçebiliriz
 
 # SQLite journal (WAL veya TRUNCATE)
 data_live/app.db-journal
