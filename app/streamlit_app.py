@@ -207,13 +207,14 @@ def tab_portfolio() -> None:
         p["mkt_value"] = p["qty"] * p["mark"]
         p["unreal_pnl"] = (p["mark"] - p["avg_price"]) * p["qty"]
         p["unreal_pnl_pct"] = 100 * (p["mark"] / p["avg_price"] - 1)
-        # Duration: bugünden opened_at'e kaç gün?
+        # Duration: bugünden opened_at'e kaç gün (her ikisini tz-naive yap)
         opened = pd.to_datetime(p["opened_at"], errors="coerce", utc=True)
-        today = pd.Timestamp.utcnow().normalize()
-        try:
-            p["duration"] = (today.tz_localize("UTC") - opened.dt.normalize()).dt.days
-        except TypeError:
-            p["duration"] = (today - opened.dt.tz_localize(None).dt.normalize()).dt.days
+        opened = opened.dt.tz_convert("UTC").dt.tz_localize(None).dt.normalize()
+        today = pd.Timestamp.utcnow()
+        if today.tzinfo is not None:
+            today = today.tz_convert("UTC").tz_localize(None)
+        today = today.normalize()
+        p["duration"] = (today - opened).dt.days
 
         show = p[["coin", "qty", "avg_price", "mark",
                   "mkt_value", "unreal_pnl", "unreal_pnl_pct",
