@@ -24,42 +24,84 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Push to HuggingFace Space
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install huggingface_hub
+        run: |
+          pip install "huggingface_hub>=0.24"
+
+      - name: Stage files for Space
+        run: |
+          set -e
+          mkdir -p stage
+          # app/ içeriği Space'in root'una gider
+          cp -r app/* stage/
+          # code/ ve data_live/app.db Space içinde ayrı klasörlere
+          mkdir -p stage/code stage/data_live
+          cp -r code/* stage/code/
+          if [ -f data_live/app.db ]; then
+            cp data_live/app.db stage/data_live/app.db
+          fi
+          # .gitattributes: DB'yi LFS'e yönlendir
+          cat > stage/.gitattributes <<'EOF'
+          *.db filter=lfs diff=lfs merge=lfs -text
+          data_live/app.db filter=lfs diff=lfs merge=lfs -text
+          EOF
+          ls -la stage/ stage/code/ stage/data_live/
+
+      - name: Upload to HuggingFace Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_USER:  ${{ secrets.HF_USER }}   # kullanıcı adı, ör: bayramk
-          HF_SPACE: ${{ secrets.HF_SPACE }}  # space adı, ör: v4-crypto-signals
+          HF_USER:  ${{ secrets.HF_USER }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
         run: |
           set -e
           if [ -z "$HF_TOKEN" ] || [ -z "$HF_USER" ] || [ -z "$HF_SPACE" ]; then
             echo "HF_TOKEN, HF_USER, HF_SPACE secrets eksik — atlıyorum"
             exit 0
           fi
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi, CommitOperationAdd, CommitOperationDelete
+          from pathlib import Path
 
-          tmp=$(mktemp -d)
-          cd "$tmp"
-          git clone "https://$HF_USER:$HF_TOKEN@huggingface.co/spaces/$HF_USER/$HF_SPACE" space
-          cd space
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          repo_id = f"{os.environ['HF_USER']}/{os.environ['HF_SPACE']}"
+          stage = Path("stage")
 
-          # mevcut Space içeriğini temizle (tracked files)
-          git rm -rf . 2>/dev/null || true
+          # Space'teki mevcut dosyalar — staged set'te olmayanları sil
+          try:
+              remote_files = set(api.list_repo_files(repo_id=repo_id, repo_type="space"))
+          except Exception:
+              remote_files = set()
 
-          # app/ altı kök seviyeye kopyala + code/ + data_live/app.db
-          WS="$GITHUB_WORKSPACE"
-          cp -r "$WS/app/"* .
-          mkdir -p code data_live
-          cp -r "$WS/code/"* code/
-          # sadece DB dosyası — diğer data_live kalmasın
-          if [ -f "$WS/data_live/app.db" ]; then
-            cp "$WS/data_live/app.db" data_live/
-          fi
+          local_files = {
+              str(p.relative_to(stage)).replace("\\", "/")
+              for p in stage.rglob("*") if p.is_file()
+          }
 
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "no changes to sync"
-          else
-            git commit -m "sync from github: $(date -u +%Y-%m-%dT%H:%M)"
-            git push
-          fi
+          ops = []
+          for rel in sorted(local_files):
+              ops.append(CommitOperationAdd(
+                  path_in_repo=rel,
+                  path_or_fileobj=str(stage / rel),
+              ))
+          # README.md dışındaki farklı dosyaları sil (README hep güncellenir)
+          for rel in sorted(remote_files - local_files):
+              if rel.startswith(".gitattributes"):
+                  continue
+              ops.append(CommitOperationDelete(path_in_repo=rel))
+
+          from datetime import datetime
+          msg = f"sync from github: {datetime.utcnow().isoformat(timespec='minutes')}Z"
+          api.create_commit(
+              repo_id=repo_id,
+              repo_type="space",
+              operations=ops,
+              commit_message=msg,
+          )
+          print(f"Pushed {len(local_files)} files, deleted {len(ops) - len(local_files)}")
+          PY
