@@ -1,0 +1,64 @@
+name: sync-to-hf-space
+
+on:
+  # daily-signals commit yaptığında tetikle
+  push:
+    branches: [main, master]
+    paths:
+      - "live_trading/data_live/app.db"
+      - "live_trading/app/**"
+  # elle tetikle
+  workflow_dispatch:
+
+concurrency:
+  group: sync-hf-space
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Push to HuggingFace Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USER:  ${{ secrets.HF_USER }}   # kullanıcı adı, ör: bayramk
+          HF_SPACE: ${{ secrets.HF_SPACE }}  # space adı, ör: v4-crypto-signals
+        run: |
+          set -e
+          if [ -z "$HF_TOKEN" ] || [ -z "$HF_USER" ] || [ -z "$HF_SPACE" ]; then
+            echo "HF_TOKEN, HF_USER, HF_SPACE secrets eksik — atlıyorum"
+            exit 0
+          fi
+
+          tmp=$(mktemp -d)
+          cd "$tmp"
+          git clone "https://$HF_USER:$HF_TOKEN@huggingface.co/spaces/$HF_USER/$HF_SPACE" space
+          cd space
+
+          # mevcut Space içeriğini temizle (tracked files)
+          git rm -rf . 2>/dev/null || true
+
+          # app/ altı kök seviyeye kopyala + code/ + data_live/app.db
+          WS="$GITHUB_WORKSPACE/live_trading"
+          cp -r "$WS/app/"* .
+          mkdir -p code data_live
+          cp -r "$WS/code/"* code/
+          # sadece DB dosyası — diğer data_live kalmasın
+          if [ -f "$WS/data_live/app.db" ]; then
+            cp "$WS/data_live/app.db" data_live/
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes to sync"
+          else
+            git commit -m "sync from github: $(date -u +%Y-%m-%dT%H:%M)"
+            git push
+          fi

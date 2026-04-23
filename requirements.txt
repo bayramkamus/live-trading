@@ -1,0 +1,17 @@
+# Core — hem GitHub Actions hem HF Spaces hem yerel için
+pandas>=2.0
+numpy>=1.24
+pyarrow>=14.0
+lightgbm>=4.0
+requests>=2.31
+
+# Web UI (HF Spaces)
+streamlit>=1.30
+
+# NLP (yerel sentiment pipeline'i için — cloud'da genelde gerekmez,
+# sentiment.parquet'ler git ile sync geliyor)
+# Cloud runtime'da CPU torch ve transformers 400 MB+ eklediği için
+# GitHub Actions'ta ihtiyacınız yoksa aşağıdaki iki satırı yoruma alın.
+transformers>=4.40
+torch>=2.2
+sentencepiece>=0.1.99

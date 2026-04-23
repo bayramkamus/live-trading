@@ -1,0 +1,117 @@
+name: daily-signals
+
+on:
+  # her gün 02:10 UTC (Binance/FRED close sonrası güvenli pencere)
+  schedule:
+    - cron: "10 2 * * *"
+  # elle tetikleme
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Hangi gün için çalıştır (YYYY-MM-DD, boş = bugün UTC)"
+        required: false
+        default: ""
+      skip_update:
+        description: "fetcher'ları atla"
+        type: boolean
+        default: false
+      execute:
+        description: "PaperBroker'a işlem yaz"
+        type: boolean
+        default: true
+
+# aynı anda birden fazla koşma olmasın
+concurrency:
+  group: daily-signals
+  cancel-in-progress: false
+
+# Actions'ın repo'ya commit yazabilmesi için
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # workflow çalışma dizini
+    defaults:
+      run:
+        working-directory: live_trading
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # commit yazmak için token
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # LFS varsa model dosyalarını da çek
+          lfs: true
+          fetch-depth: 2
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: live_trading/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run daily pipeline
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          NEWSAPI_KEY:  ${{ secrets.NEWSAPI_KEY }}
+          PAPER_BASE_EQUITY: ${{ vars.PAPER_BASE_EQUITY || '10000' }}
+          PAPER_RISK_PCT:    ${{ vars.PAPER_RISK_PCT    || '0.10' }}
+          MIN_CONFIDENCE:    ${{ vars.MIN_CONFIDENCE    || '0'    }}
+          DATE_ARG:          ${{ github.event.inputs.date }}
+          SKIP_UPDATE:       ${{ github.event.inputs.skip_update }}
+          EXECUTE:           ${{ github.event.inputs.execute }}
+        run: |
+          args=""
+          if [ -n "$DATE_ARG" ]; then
+            args="$args --date $DATE_ARG"
+          fi
+          if [ "$SKIP_UPDATE" = "true" ]; then
+            args="$args --skip-update"
+          fi
+          if [ "$EXECUTE" = "false" ]; then
+            args="$args --no-execute"
+          fi
+          python scripts/daily_run.py $args
+
+      - name: Commit updated DB and logs
+        if: success() || failure()   # hata olsa bile log commit'le
+        run: |
+          cd ..
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # yalnız izlediğimiz dosyaları ekle
+          git add live_trading/data_live/app.db || true
+          git add live_trading/data_live/broker/*.json live_trading/data_live/broker/*.csv || true
+          git add live_trading/logs/*.log live_trading/logs/*.csv live_trading/logs/*.json || true
+
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+          else
+            stamp=$(date -u +"%Y-%m-%d %H:%M UTC")
+            git commit -m "daily-signals: $stamp"
+            # Actions'ın kendi push'u HF Space webhook'unu tetikleyecek
+            git push
+          fi
+
+      - name: Upload logs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-logs-${{ github.run_id }}
+          path: |
+            live_trading/logs/daily_*.log
+            live_trading/logs/signals_*.csv
+            live_trading/logs/errors_*.json
+          retention-days: 14

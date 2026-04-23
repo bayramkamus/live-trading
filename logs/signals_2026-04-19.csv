@@ -1,0 +1,11 @@
+coin,signal,signal_int,p_sell,p_hold,p_buy,buy_th,sell_th,horizon,n_features,as_of_date,has_sent,has_macro,has_tech
+BTC,HOLD,0,0.2991,0.4061,0.2948,0.35,0.3,5,71,2026-04-19,True,False,False
+ETH,HOLD,0,0.2132,0.544,0.2427,0.45,0.3,1,71,2026-04-19,True,False,False
+BNB,HOLD,0,0.2957,0.4105,0.2938,0.35,0.3,7,71,2026-04-19,True,False,False
+SOL,SELL,-1,0.3334,0.3944,0.2721,0.4,0.3,1,71,2026-04-19,True,False,False
+XRP,SELL,-1,0.3201,0.3631,0.3168,0.4,0.3,7,71,2026-04-19,True,False,False
+ADA,BUY,1,0.2614,0.3648,0.3738,0.35,0.3,5,71,2026-04-19,True,False,False
+DOT,SELL,-1,0.3017,0.4022,0.2961,0.35,0.3,7,71,2026-04-19,True,False,False
+AVAX,BUY,1,0.2164,0.3938,0.3898,0.35,0.3,10,71,2026-04-19,True,False,False
+LINK,HOLD,0,0.2686,0.4503,0.2812,0.35,0.35,1,71,2026-04-19,True,False,False
+LTC,HOLD,0,0.2895,0.4253,0.2852,0.45,0.3,3,71,2026-04-19,True,False,False

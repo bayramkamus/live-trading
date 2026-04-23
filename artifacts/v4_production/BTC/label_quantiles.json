@@ -1,0 +1,10 @@
+{
+  "horizon": 5,
+  "q30": -0.019696,
+  "q70": 0.024938,
+  "n_train_rows": 1461,
+  "n_train_with_return": 1461,
+  "n_buy": 470,
+  "n_hold": 618,
+  "n_sell": 478
+}

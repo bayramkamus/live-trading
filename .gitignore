@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.env
+
+# ham parquet cache'leri — DB'ye yansıdığı için git'te tutmak gerekmiyor
+data_live/ohlcv/*.parquet
+data_live/tech/*.parquet
+data_live/sentiment/*.parquet
+data_live/macro/*.parquet
+
+# SQLite journal (WAL veya TRUNCATE)
+data_live/app.db-journal
+data_live/app.db-wal
+data_live/app.db-shm
+
+# venv/virtualenv
+.venv/
+venv/
+env/
