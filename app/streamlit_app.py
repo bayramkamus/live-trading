@@ -23,11 +23,17 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# code/ ve scripts/ path
-ROOT = Path(__file__).resolve().parent.parent
-for sub in ("code", "scripts"):
-    p = ROOT / sub
-    if str(p) not in sys.path:
+# code/ ve scripts/ path — hem yerel (live_trading/app/) hem HF Space (flat) layout
+_here = Path(__file__).resolve().parent
+_candidates = [
+    _here,                    # HF Space: code/, data_live/ streamlit_app.py ile aynı seviyede
+    _here / "code",           # HF Space: code/ streamlit_app.py içinde
+    _here.parent,             # yerel: live_trading/
+    _here.parent / "code",    # yerel: live_trading/code/
+    _here.parent / "scripts",
+]
+for p in _candidates:
+    if p.exists() and str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 from db import DB, DB_PATH  # noqa: E402
@@ -264,13 +270,4 @@ def main() -> None:
     with tab3:
         tab_history()
 
-    with st.sidebar:
-        st.caption("V4 leakage-fix production — LightGBM + 71 feature")
-        if st.button("🔄 Cache temizle"):
-            st.cache_data.clear()
-            st.rerun()
-        st.caption(f"DB: `{DB_PATH.name}`")
-
-
-if __name__ == "__main__":
-    main()
+    with st.si
