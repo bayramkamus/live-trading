@@ -270,4 +270,18 @@ def main() -> None:
     with tab3:
         tab_history()
 
-    with st.si
+    with st.sidebar:
+        st.markdown("### Ayarlar")
+        if st.button("🔄 Cache'i temizle"):
+            st.cache_data.clear()
+            st.rerun()
+        st.caption(f"DB: `{DB_PATH}`")
+        meta = load_meta()
+        if meta:
+            st.caption("**Meta**")
+            for k, v in meta.items():
+                st.caption(f"{k}: `{v}`")
+
+
+if __name__ == "__main__":
+    main()
