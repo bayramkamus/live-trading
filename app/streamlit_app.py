@@ -276,10 +276,10 @@ def main() -> None:
             st.cache_data.clear()
             st.rerun()
         st.caption(f"DB: `{DB_PATH}`")
-        meta = load_meta()
-        if meta:
-            st.caption("**Meta**")
-            for k, v in meta.items():
+        st.caption("**Meta**")
+        for k in ("last_run", "last_date", "last_model_version"):
+            v = load_meta(k)
+            if v:
                 st.caption(f"{k}: `{v}`")
 
 
