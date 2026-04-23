@@ -34,11 +34,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # workflow çalışma dizini
-    defaults:
-      run:
-        working-directory: live_trading
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,7 +49,7 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: live_trading/requirements.txt
+          cache-dependency-path: requirements.txt
 
       - name: Install dependencies
         run: |
@@ -87,14 +82,13 @@ jobs:
       - name: Commit updated DB and logs
         if: success() || failure()   # hata olsa bile log commit'le
         run: |
-          cd ..
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           # yalnız izlediğimiz dosyaları ekle
-          git add live_trading/data_live/app.db || true
-          git add live_trading/data_live/broker/*.json live_trading/data_live/broker/*.csv || true
-          git add live_trading/logs/*.log live_trading/logs/*.csv live_trading/logs/*.json || true
+          git add data_live/app.db || true
+          git add data_live/broker/*.json data_live/broker/*.csv || true
+          git add logs/*.log logs/*.csv logs/*.json || true
 
           if git diff --cached --quiet; then
             echo "no changes to commit"
@@ -111,7 +105,7 @@ jobs:
         with:
           name: daily-logs-${{ github.run_id }}
           path: |
-            live_trading/logs/daily_*.log
-            live_trading/logs/signals_*.csv
-            live_trading/logs/errors_*.json
+            logs/daily_*.log
+            logs/signals_*.csv
+            logs/errors_*.json
           retention-days: 14

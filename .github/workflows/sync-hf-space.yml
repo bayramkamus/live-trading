@@ -5,8 +5,9 @@ on:
   push:
     branches: [main, master]
     paths:
-      - "live_trading/data_live/app.db"
-      - "live_trading/app/**"
+      - "data_live/app.db"
+      - "app/**"
+      - "code/**"
   # elle tetikle
   workflow_dispatch:
 
@@ -44,7 +45,7 @@ jobs:
           git rm -rf . 2>/dev/null || true
 
           # app/ altı kök seviyeye kopyala + code/ + data_live/app.db
-          WS="$GITHUB_WORKSPACE/live_trading"
+          WS="$GITHUB_WORKSPACE"
           cp -r "$WS/app/"* .
           mkdir -p code data_live
           cp -r "$WS/code/"* code/
