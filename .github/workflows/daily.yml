@@ -61,8 +61,9 @@ jobs:
 
       - name: Run daily pipeline
         env:
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-          NEWSAPI_KEY:  ${{ secrets.NEWSAPI_KEY }}
+          FRED_API_KEY:       ${{ secrets.FRED_API_KEY }}
+          NEWSAPI_KEY:        ${{ secrets.NEWSAPI_KEY }}
+          CRYPTOCOMPARE_KEY:  ${{ secrets.CRYPTOCOMPARE_KEY }}
           PAPER_BASE_EQUITY: ${{ vars.PAPER_BASE_EQUITY || '10000' }}
           PAPER_RISK_PCT:    ${{ vars.PAPER_RISK_PCT    || '0.10' }}
           MIN_CONFIDENCE:    ${{ vars.MIN_CONFIDENCE    || '0'    }}

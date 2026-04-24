@@ -39,6 +39,10 @@ API_KEYS = {
     # https://newsapi.org/   (ücretsiz tier: günde 100 req, 30 gün geçmiş)
     "NEWSAPI_KEY":       "1c1ed95bb65a46cdbb61033ff14a1197",
 
+    # https://min-api.cryptocompare.com  (ücretsiz tier: 100k req/ay, key'siz
+    # tier 3k/gün ve anonim IP'lerden bazen engelleniyor — key ile daha güvenli)
+    "CRYPTOCOMPARE_KEY": "f4e58b5095263d9bcad030bdd345e99f71af25e276d551978ed77824f7a98a17",
+
     # Şu an kapalı — ileri ki kullanım için yer tutucu
     "CRYPTOPANIC_TOKEN": "",
 }
@@ -141,17 +145,41 @@ def fetch_news_cryptopanic(coin: str, since: str, until: str,
     return df.reset_index(drop=True)
 
 
+# NewsAPI için crypto domain whitelist — coin sembol ambiguity'sini elimine eder.
+# (ör. "ADA" → NVIDIA Ada Lovelace, "DOT" → emlak, "LINK" → NFL...)
+NEWSAPI_CRYPTO_DOMAINS = ",".join([
+    "coindesk.com",       "cointelegraph.com",  "decrypt.co",
+    "theblock.co",        "bitcoinmagazine.com", "cryptoslate.com",
+    "cryptobriefing.com", "u.today",             "ambcrypto.com",
+    "cryptonews.com",     "cryptopotato.com",    "newsbtc.com",
+    "beincrypto.com",     "bitcoinist.com",      "coinjournal.net",
+    "cryptodaily.co.uk",  "livecoin.com",        "crypto.news",
+])
+
+
 def fetch_news_newsapi(coin: str, since: str, until: str,
-                       page_size: int = 100) -> pd.DataFrame:
+                       page_size: int = 100,
+                       verbose: bool = False) -> pd.DataFrame:
     """NewsAPI /v2/everything — 100 req/day free tier.
 
-    Sorgu: "{coin_fullname} OR {coin_symbol}" — crypto domainlerine filtre.
+    İki eşzamanlı filtre:
+      1) Sorgu: "{fullname}" AND (crypto OR cryptocurrency OR blockchain)
+         → "Ada", "Dot", "Link" gibi ambiguous sembollerin başka alanlara
+           kaymasını engeller.
+      2) domains whitelist: sadece crypto sitelerinden çek.
+    Bu ikisiyle NewsAPI artık alakasız NFL/emlak/grafik-kartı haberleri çekmez.
     """
     key = _get_key("NEWSAPI_KEY")
     if not key:
+        if verbose: print("  [NewsAPI] key yok, atla")
         return pd.DataFrame()
 
-    q = f'"{COIN_FULLNAME.get(coin, coin.lower())}" OR "{coin}"'
+    fullname = COIN_FULLNAME.get(coin, coin.lower())
+    # "bitcoin" AND (crypto OR cryptocurrency OR blockchain OR token)
+    # Fullname zaten çoğunlukla tek başına yeterli (bitcoin, ethereum...);
+    # ama mid-cap için (cardano, polkadot, chainlink) NewsAPI relevance skoru
+    # yine kripto-dışı sonuç verebiliyordu. "AND crypto" + domain whitelist sağlam çözüm.
+    q = f'"{fullname}" AND (crypto OR cryptocurrency OR blockchain OR token)'
     params = {
         "q": q,
         "from": since,
@@ -159,22 +187,33 @@ def fetch_news_newsapi(coin: str, since: str, until: str,
         "language": "en",
         "sortBy": "publishedAt",
         "pageSize": page_size,
+        "domains": NEWSAPI_CRYPTO_DOMAINS,
         "apiKey": key,
     }
     rows: List[dict] = []
     try:
         r = requests.get("https://newsapi.org/v2/everything", params=params, timeout=15)
         if r.status_code != 200:
+            if verbose: print(f"  [NewsAPI] HTTP {r.status_code}: {r.text[:150]}")
             return pd.DataFrame()
         js = r.json()
-        for it in js.get("articles", []):
+        articles = js.get("articles", [])
+        if verbose: print(f"  [NewsAPI] {coin}: {len(articles)} article")
+        for it in articles:
             published = (it.get("publishedAt") or "")[:10]
             if not published:
                 continue
+            # Başlık + body'de coin adının geçtiğinden emin ol (ikinci güvenlik)
+            title = it.get("title", "") or ""
+            body  = it.get("description", "") or ""
+            blob = (title + " " + body).lower()
+            # Crypto/coin kelimesi en az bir kere geçmeli
+            if fullname.lower() not in blob and coin.lower() not in blob:
+                continue
             rows.append({
                 "date":   published,
-                "title":  it.get("title", "") or "",
-                "body":   it.get("description", "") or "",
+                "title":  title,
+                "body":   body,
                 "source": (it.get("source") or {}).get("name", "newsapi"),
                 "url":    it.get("url", ""),
             })
@@ -192,33 +231,50 @@ def fetch_news_newsapi(coin: str, since: str, until: str,
 # ---------- CryptoCompare News API (ÜCRETSİZ, coin-tagged) ----------
 
 def fetch_news_cryptocompare(coin: str, since: str, until: str,
-                             max_pages: int = 3) -> pd.DataFrame:
-    """CryptoCompare /data/v2/news/ — anahtar gerekmiyor.
+                             max_pages: int = 5,
+                             verbose: bool = False) -> pd.DataFrame:
+    """CryptoCompare /data/v2/news/ — key opsiyonel ama önerilir.
 
     categories=BTC,ETH... coin-tagged filtre yapar. Her istek son ~50 haber;
     lTs (timestamp) ile sayfa-sayfa geçmişe doğru gidebiliriz.
+
+    Key yoksa anonim tier çalışır (günde ~3k req, anonim IP'ler bazen
+    engelleniyor); key varsa aylık 100k req ve stabil.
     """
     url = "https://min-api.cryptocompare.com/data/v2/news/"
-    # CryptoCompare üç-harfli sembol + bazı özel isimler:
     cat_map = {"BTC": "BTC", "ETH": "ETH", "BNB": "BNB", "SOL": "SOL",
                "XRP": "XRP", "ADA": "ADA", "DOT": "DOT", "AVAX": "AVAX",
                "LINK": "LINK", "LTC": "LTC"}
     cat = cat_map.get(coin, coin)
 
     rows: List[dict] = []
-    lTs = None  # son seen timestamp
+    lTs = None
     since_ts = int(pd.Timestamp(since).timestamp())
 
+    headers = {"User-Agent": "Mozilla/5.0 (crypto-sentiment-bot/1.0)"}
+    cc_key = _get_key("CRYPTOCOMPARE_KEY")
+    if cc_key:
+        # CryptoCompare resmi format: "Apikey {key}"
+        headers["authorization"] = f"Apikey {cc_key}"
+        if verbose:
+            print(f"  [CC] {coin}: API key ile cagriliyor (authed tier)")
+    elif verbose:
+        print(f"  [CC] {coin}: key YOK, anonim tier (3k req/gun limitli)")
+
     try:
-        for _ in range(max_pages):
+        for page in range(max_pages):
             params = {"lang": "EN", "categories": cat}
             if lTs is not None:
                 params["lTs"] = lTs
-            r = requests.get(url, params=params, timeout=15)
+            r = requests.get(url, params=params, timeout=15, headers=headers)
             if r.status_code != 200:
+                if verbose:
+                    print(f"  [CC] {coin} p{page}: HTTP {r.status_code} — {r.text[:120]}")
                 break
             js = r.json()
             data = js.get("Data", []) or []
+            if verbose:
+                print(f"  [CC] {coin} p{page}: {len(data)} haber (Message={js.get('Message','?')[:40]})")
             if not data:
                 break
             for it in data:
@@ -233,74 +289,109 @@ def fetch_news_cryptocompare(coin: str, since: str, until: str,
                     "source": it.get("source", "cryptocompare"),
                     "url":    it.get("url", ""),
                 })
-            # Sayfalama: en eski dönen ts'yi lTs'ye al
             min_ts = min(int(it.get("published_on", 0)) for it in data)
             if min_ts < since_ts:
                 break
             lTs = min_ts - 1
-            time.sleep(0.3)
+            time.sleep(0.5)  # rate limit saygısı
     except Exception as e:
         warnings.warn(f"CryptoCompare hata: {e}")
+        if verbose: print(f"  [CC] {coin} EXCEPTION: {e}")
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
     if df.empty:
+        if verbose: print(f"  [CC] {coin}: dönen row sayısı 0")
         return df
+    before_filter = len(df)
     df = df[(df["date"] >= since) & (df["date"] <= until)]
+    if verbose and len(df) < before_filter:
+        print(f"  [CC] {coin}: tarih filtresi {before_filter} → {len(df)}")
     return df.drop_duplicates("url").reset_index(drop=True)
 
 
 # ---------- RSS (ücretsiz, sınırsız) ----------
 
-def fetch_news_rss(coin: str, since: str, until: str) -> pd.DataFrame:
+def fetch_news_rss(coin: str, since: str, until: str,
+                   verbose: bool = False) -> pd.DataFrame:
     """RSS feedlerini tarayıp coin adı geçen haberleri döndürür.
 
-    Not: feedparser olmadan (stdlib xml.etree) çalışır — ekstra dep yok.
+    Önce feedparser varsa onu dener (daha sağlam Atom/ns handling);
+    yoksa stdlib xml.etree ile parse eder.
     """
-    import xml.etree.ElementTree as ET
     from email.utils import parsedate_to_datetime
 
     fullname = COIN_FULLNAME.get(coin, coin.lower())
-    needles = [fullname.lower(), coin.lower(), coin.upper()]
+    needles = [fullname.lower(), coin.lower()]  # BTC, ETH gibi kısalar için case-insensitive sub
+
+    # Gerçekçi User-Agent — Coindesk/Cointelegraph bot koruması için
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+    headers = {"User-Agent": UA, "Accept": "application/rss+xml, application/xml, text/xml, */*"}
+
+    try:
+        import feedparser  # opsiyonel, requirements'ta varsa daha iyi
+        _has_fp = True
+    except ImportError:
+        _has_fp = False
 
     rows: List[dict] = []
     for feed_url in RSS_FEEDS:
         try:
-            r = requests.get(feed_url, timeout=10,
-                             headers={"User-Agent": "Mozilla/5.0 (crypto-sentiment-bot)"})
+            r = requests.get(feed_url, timeout=15, headers=headers)
             if r.status_code != 200:
+                if verbose:
+                    print(f"  [RSS] {coin} {feed_url.split('/')[2]}: HTTP {r.status_code}")
                 continue
-            # Namespace temizle — ET bazı feedlerde ns tag'leri zorlaştırıyor
-            root = ET.fromstring(r.content)
-            # RSS 2.0 → channel/item ; Atom → entry
-            items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
-            for it in items:
-                title_el = it.find("title") or it.find("{http://www.w3.org/2005/Atom}title")
-                desc_el  = (it.find("description") or it.find("summary")
-                            or it.find("{http://www.w3.org/2005/Atom}summary")
-                            or it.find("{http://www.w3.org/2005/Atom}content"))
-                pub_el   = (it.find("pubDate") or it.find("published")
-                            or it.find("{http://www.w3.org/2005/Atom}published")
-                            or it.find("{http://www.w3.org/2005/Atom}updated"))
-                link_el  = it.find("link") or it.find("{http://www.w3.org/2005/Atom}link")
 
-                title = (title_el.text or "") if title_el is not None else ""
-                desc  = (desc_el.text  or "") if desc_el  is not None else ""
-                # Atom <link href="..."/>
-                if link_el is not None:
-                    link = link_el.text or link_el.get("href", "") or ""
-                else:
-                    link = ""
-                pub_txt = (pub_el.text or "") if pub_el is not None else ""
+            items_raw = []
 
-                # Coin filtresi (case-insensitive)
-                blob = (title + " " + desc).lower()
+            if _has_fp:
+                fp = feedparser.parse(r.content)
+                for e in fp.entries:
+                    items_raw.append({
+                        "title": (e.get("title") or "").strip(),
+                        "body":  ((e.get("summary") or e.get("description") or
+                                   (e.get("content", [{}])[0] if e.get("content") else {}).get("value", "")) or ""),
+                        "link":  e.get("link") or "",
+                        "pub":   e.get("published") or e.get("updated") or "",
+                    })
+            else:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(r.content)
+                items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
+                for it in items:
+                    title_el = it.find("title") or it.find("{http://www.w3.org/2005/Atom}title")
+                    # content:encoded bazı feedlerde asıl body
+                    desc_el  = (it.find("{http://purl.org/rss/1.0/modules/content/}encoded")
+                                or it.find("description")
+                                or it.find("summary")
+                                or it.find("{http://www.w3.org/2005/Atom}summary")
+                                or it.find("{http://www.w3.org/2005/Atom}content"))
+                    pub_el   = (it.find("pubDate") or it.find("published")
+                                or it.find("{http://www.w3.org/2005/Atom}published")
+                                or it.find("{http://www.w3.org/2005/Atom}updated"))
+                    link_el  = it.find("link") or it.find("{http://www.w3.org/2005/Atom}link")
+
+                    title = (title_el.text or "") if title_el is not None else ""
+                    desc  = (desc_el.text  or "") if desc_el  is not None else ""
+                    if link_el is not None:
+                        link = link_el.text or link_el.get("href", "") or ""
+                    else:
+                        link = ""
+                    pub_txt = (pub_el.text or "") if pub_el is not None else ""
+                    items_raw.append({"title": title, "body": desc, "link": link, "pub": pub_txt})
+
+            if verbose:
+                print(f"  [RSS] {coin} {feed_url.split('/')[2]}: {len(items_raw)} item (pre-filter)")
+
+            matched = 0
+            for it in items_raw:
+                blob = (it["title"] + " " + it["body"]).lower()
                 if not any(n in blob for n in needles):
                     continue
-
-                # Tarih parse
                 try:
-                    dt = parsedate_to_datetime(pub_txt) if pub_txt else None
+                    dt = parsedate_to_datetime(it["pub"]) if it["pub"] else None
                     d = dt.date().isoformat() if dt else ""
                 except Exception:
                     d = ""
@@ -308,12 +399,17 @@ def fetch_news_rss(coin: str, since: str, until: str) -> pd.DataFrame:
                     continue
                 rows.append({
                     "date":   d,
-                    "title":  title,
-                    "body":   desc,
+                    "title":  it["title"],
+                    "body":   it["body"],
                     "source": feed_url.split("/")[2],
-                    "url":    link,
+                    "url":    it["link"],
                 })
+                matched += 1
+            if verbose and matched:
+                print(f"  [RSS] {coin} {feed_url.split('/')[2]}: {matched} eşleşti")
         except Exception as e:
+            if verbose:
+                print(f"  [RSS] {coin} {feed_url.split('/')[2]}: EXCEPTION {e}")
             warnings.warn(f"RSS [{feed_url}] hata: {e}")
             continue
 
