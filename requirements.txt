@@ -3,7 +3,9 @@ pandas>=2.0
 numpy>=1.24
 pyarrow>=14.0
 lightgbm>=4.0
+xgboost>=2.0
 requests>=2.31
+feedparser>=6.0       # RSS parse — Atom/ns/content:encoded hepsini düzgün halleder
 
 # Web UI (HF Spaces)
 streamlit>=1.30
