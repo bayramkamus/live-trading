@@ -19,3 +19,5 @@ env/
 
 news_debug.log
 logs/news_coverage_*.csv
+
+news_debug.log
