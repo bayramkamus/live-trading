@@ -38,8 +38,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # commit yazmak için token
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # ACTIONS_PAT → bu token ile yapılan push, diğer workflow'ları
+          # (sync-to-hf-space) tetikler. GITHUB_TOKEN tetiklemiyor (loop guard).
+          # Fallback: PAT yoksa GITHUB_TOKEN kullan (repo yine build eder,
+          # sadece HF sync otomatik olmaz).
+          token: ${{ secrets.ACTIONS_PAT || secrets.GITHUB_TOKEN }}
           # LFS varsa model dosyalarını da çek
           lfs: true
           fetch-depth: 2
@@ -88,6 +91,11 @@ jobs:
           # yalnız izlediğimiz dosyaları ekle
           git add data_live/app.db || true
           git add data_live/broker/*.json data_live/broker/*.csv || true
+          # Rolling pencereler (sentiment lag/roll) için parquet seed'leri
+          git add data_live/sentiment/*.parquet || true
+          git add data_live/tech/*.parquet || true
+          git add data_live/macro/*.parquet || true
+          git add data_live/ohlcv/*.parquet || true
           git add logs/*.log logs/*.csv logs/*.json || true
 
           if git diff --cached --quiet; then
