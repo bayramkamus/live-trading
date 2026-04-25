@@ -1,15 +1,19 @@
 """Binance günlük OHLCV çekici + 42 teknik feature hesaplayıcı.
 
 Akış:
-  1) fetch_binance_klines(sym, interval, start_ms, end_ms)
+  1) fetch_klines(sym, interval, start_ms, end_ms)  # Binance birinci, CC fallback
   2) compute_technical_features(ohlcv_1d, ohlcv_4h, btc_close_series)
   3) update_coin(coin)  → data_live/tech/{COIN}.parquet (historical ile concat)
 
-Binance public API, anahtar gerekmiyor (IP bazlı rate limit: 1200 istek/dk).
+Birinci kaynak: Binance public API (anahtar gerekmiyor, 1200 istek/dk).
+Fallback: CryptoCompare (CRYPTOCOMPARE_KEY env var, 50k istek/ay free tier).
+Fallback gerekçesi: Binance ABD-IP'den geo-blocked (HTTP 451), GitHub Actions
+runner'ları US-based — Binance fail ederse CC'ye düşüyoruz ki workflow patlamasın.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import time
 import warnings
 from datetime import datetime, timedelta, timezone
@@ -23,6 +27,7 @@ import requests
 from paths import TECH_DIR, COINS, HISTORICAL_DATA_ROOT, DATA_LIVE
 
 BINANCE_BASE = "https://api.binance.com/api/v3/klines"
+CC_BASE      = "https://min-api.cryptocompare.com/data/v2"
 OHLCV_DIR    = DATA_LIVE / "ohlcv"  # execute.py close fiyatını buradan okur
 BINANCE_SYMBOLS = {
     "BTC":  "BTCUSDT", "ETH":  "ETHUSDT", "BNB":  "BNBUSDT",
@@ -85,6 +90,128 @@ def fetch_binance_klines(symbol: str, interval: str,
     for c in ("open", "high", "low", "close", "volume"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df[["open_time", "open", "high", "low", "close", "volume"]]
+
+
+# ============================================================
+# 1b. CRYPTOCOMPARE FALLBACK
+# ============================================================
+
+def fetch_cryptocompare_ohlcv(symbol: str, interval: str,
+                               start_ms: int, end_ms: Optional[int] = None,
+                               api_key: Optional[str] = None) -> pd.DataFrame:
+    """CryptoCompare histoday/histohour fallback for when Binance is blocked.
+
+    Output schema matches fetch_binance_klines exactly:
+        open_time (UTC, tz-naive), open, high, low, close, volume
+
+    Volume = "volumefrom" (base asset volume), same convention as Binance.
+    Pair: prefer USDT, fall back to USD if USDT not available.
+    """
+    if api_key is None:
+        api_key = os.environ.get("CRYPTOCOMPARE_KEY", "")
+
+    if interval == "1d":
+        endpoint, aggregate = "histoday", 1
+    elif interval == "4h":
+        endpoint, aggregate = "histohour", 4
+    elif interval == "1h":
+        endpoint, aggregate = "histohour", 1
+    else:
+        raise ValueError(f"Bilinmeyen interval: {interval}")
+
+    # Binance sembolünü ayır: BTCUSDT → BTC + USDT
+    if symbol.endswith("USDT"):
+        fsym, tsym = symbol[:-4], "USDT"
+    elif symbol.endswith("USD"):
+        fsym, tsym = symbol[:-3], "USD"
+    else:
+        fsym, tsym = symbol, "USDT"
+
+    if end_ms is None:
+        end_ms = int(time.time() * 1000)
+    end_ts = end_ms // 1000
+    start_ts = start_ms // 1000
+
+    url = f"{CC_BASE}/{endpoint}"
+    headers = {}
+    if api_key:
+        headers["authorization"] = f"Apikey {api_key}"
+
+    rows: List[dict] = []
+    cursor_to = end_ts
+    tsym_tried_usd = False
+    safety = 20  # max paging rounds
+
+    while cursor_to > start_ts and safety > 0:
+        safety -= 1
+        params = {
+            "fsym": fsym, "tsym": tsym,
+            "limit": 2000,
+            "toTs": cursor_to,
+            "aggregate": aggregate,
+        }
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=20)
+            if r.status_code != 200:
+                warnings.warn(
+                    f"CryptoCompare {fsym}/{tsym} {interval} status={r.status_code}: {r.text[:200]}"
+                )
+                break
+            payload = r.json()
+        except Exception as e:
+            warnings.warn(f"CryptoCompare fetch hata {fsym}/{tsym} {interval}: {e}")
+            break
+
+        if payload.get("Response") != "Success":
+            msg = payload.get("Message", "")[:200]
+            # USDT yoksa USD'ye düş (BNB gibi bazı coinler)
+            if tsym == "USDT" and not tsym_tried_usd:
+                tsym_tried_usd = True
+                tsym = "USD"
+                continue
+            warnings.warn(f"CryptoCompare {fsym}/{tsym} response failed: {msg}")
+            break
+
+        data = payload.get("Data", {}).get("Data", [])
+        if not data:
+            break
+
+        # In-range filter
+        for b in data:
+            t = b.get("time", 0)
+            if start_ts <= t <= end_ts:
+                rows.append(b)
+
+        oldest_in_batch = data[0].get("time", 0)
+        if oldest_in_batch <= start_ts:
+            break
+        cursor_to = oldest_in_batch - 1
+        time.sleep(0.15)
+
+    if not rows:
+        return pd.DataFrame(columns=["open_time", "open", "high", "low", "close", "volume"])
+
+    df = pd.DataFrame(rows).drop_duplicates(subset=["time"]).sort_values("time")
+    df["open_time"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_convert(None)
+    df["volume"] = df.get("volumefrom", 0.0)
+    for c in ("open", "high", "low", "close", "volume"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df[["open_time", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+
+
+def fetch_klines(symbol: str, interval: str,
+                 start_ms: int, end_ms: Optional[int] = None,
+                 limit: int = 1000) -> pd.DataFrame:
+    """Wrapper: Binance birinci, başarısız (boş/451) ise CryptoCompare fallback.
+
+    GitHub Actions runner'ları US-based, Binance ABD'den geo-blocked (HTTP 451).
+    Bu wrapper sayesinde workflow erişebildiği kaynaktan veri çeker.
+    """
+    df = fetch_binance_klines(symbol, interval, start_ms, end_ms, limit)
+    if not df.empty:
+        return df
+    print(f"[fallback] {symbol} {interval} → CryptoCompare")
+    return fetch_cryptocompare_ohlcv(symbol, interval, start_ms, end_ms)
 
 
 # ============================================================
@@ -294,14 +421,14 @@ def update_coin(coin: str, lookback_days: int = 30,
     start = (last - pd.Timedelta(days=60)).to_pydatetime().replace(tzinfo=timezone.utc)
     start_ms = int(start.timestamp() * 1000)
 
-    # Yeni günleri çek (1d + 4h)
-    new_d = fetch_binance_klines(sym, "1d", start_ms)
+    # Yeni günleri çek (1d + 4h) — Binance birinci, CC fallback
+    new_d = fetch_klines(sym, "1d", start_ms)
     if new_d.empty:
-        print(f"[{coin}] Binance'tan veri gelmedi, mevcut dosya korundu")
+        print(f"[{coin}] hiçbir kaynaktan veri gelmedi, mevcut dosya korundu")
         existing.to_parquet(out, index=False)
         return out
 
-    new_4h = fetch_binance_klines(sym, "4h", start_ms)
+    new_4h = fetch_klines(sym, "4h", start_ms)
 
     # Ham günlük OHLCV'yi de data_live/ohlcv/{coin}_1d.parquet'a yaz
     # execute.py close fiyatı için buradan okuyor
@@ -322,7 +449,7 @@ def update_coin(coin: str, lookback_days: int = 30,
 
     # BTC paralelde — ya çağrıldığıyla cache ya yeniden çek
     if btc_daily_cached is None:
-        btc_daily_cached = fetch_binance_klines("BTCUSDT", "1d", start_ms)
+        btc_daily_cached = fetch_klines("BTCUSDT", "1d", start_ms)
 
     feat_new = compute_technical_features(new_d, new_4h, btc_daily_cached)
 
@@ -345,7 +472,7 @@ def update_all(lookback_days: int = 30) -> None:
     """Tüm coinler — BTC feature'ları için BTC'yi bir kere çek ve cache'le."""
     print("[ohlcv] BTC günlük veri çekiliyor (cache)...")
     start = (pd.Timestamp.utcnow() - pd.Timedelta(days=365)).to_pydatetime().replace(tzinfo=timezone.utc)
-    btc_cache = fetch_binance_klines("BTCUSDT", "1d", int(start.timestamp() * 1000))
+    btc_cache = fetch_klines("BTCUSDT", "1d", int(start.timestamp() * 1000))
 
     for c in COINS:
         try:
@@ -378,9 +505,9 @@ if __name__ == "__main__":
         backfill_from_historical()
     elif args.cmd == "test":
         start = int((pd.Timestamp.utcnow() - pd.Timedelta(days=10)).timestamp() * 1000)
-        d  = fetch_binance_klines(BINANCE_SYMBOLS[args.coin], "1d", start)
-        fh = fetch_binance_klines(BINANCE_SYMBOLS[args.coin], "4h", start)
-        bt = fetch_binance_klines("BTCUSDT", "1d", start)
+        d  = fetch_klines(BINANCE_SYMBOLS[args.coin], "1d", start)
+        fh = fetch_klines(BINANCE_SYMBOLS[args.coin], "4h", start)
+        bt = fetch_klines("BTCUSDT", "1d", start)
         feat = compute_technical_features(d, fh, bt)
         print(feat.tail(3).T)
     else:
