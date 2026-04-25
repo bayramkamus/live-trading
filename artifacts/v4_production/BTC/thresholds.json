@@ -1,5 +1,5 @@
 {
-  "buy_th": 0.35,
-  "sell_th": 0.3,
-  "val_sharpe": 0.8475
+  "buy_th": 0.45,
+  "sell_th": 0.45,
+  "val_sharpe": 1.906
 }

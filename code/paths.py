@@ -25,7 +25,20 @@ MACRO_DIR = DATA_LIVE / "macro"
 
 # Backfill: eğitimde kullanılan geçmiş veriyi buradan okuruz (tek seferlik kopya)
 # Canlıya geçtikten sonra bu referans kalkar.
-HISTORICAL_DATA_ROOT = Path("/sessions/exciting-eloquent-goodall/mnt/data")
+# live_trading/ klasörü `data/` altındaysa otomatik bulur (Windows + Linux uyumlu).
+# Override için LIVE_HISTORICAL_DATA_ROOT env var kullanılabilir.
+import os
+_env_override = os.environ.get("LIVE_HISTORICAL_DATA_ROOT")
+if _env_override:
+    HISTORICAL_DATA_ROOT = Path(_env_override).resolve()
+else:
+    # ROOT = live_trading/, parent = data/  (bizim repo düzeni)
+    _candidate = ROOT.parent
+    if (_candidate / "models" / "v2_sentiment_strategy").is_dir():
+        HISTORICAL_DATA_ROOT = _candidate
+    else:
+        # Fallback: cowork mount path (sadece sandbox'ta anlamlı)
+        HISTORICAL_DATA_ROOT = Path("/sessions/exciting-eloquent-goodall/mnt/data")
 
 COINS = ["BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOT", "AVAX", "LINK", "LTC"]
 

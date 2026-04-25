@@ -1,8 +1,11 @@
-"""Canlı sentiment pipeline — haber → NLP ensemble → günlük feature parquet.
+"""Canlı sentiment pipeline — haber → NLP head → günlük feature parquet.
 
 Akış:
   1) fetch_news(coin, since, until)  → CryptoPanic / NewsAPI / RSS
-  2) NLPEnsemble.score_batch(texts)  → FinBERT + CryptoBERT + J-Hartmann → combined_score
+  2) NLPEnsemble.score_batch(texts)  → FinBERT + CryptoBERT + J-Hartmann
+                                      combined_score = J-Hartmann (winner of V4
+                                      NLP combo ablation on S1). fb/cb scores
+                                      logged for diagnostics only.
   3) aggregate_daily(scored, coin)   → günlük tek skor + ratio + count
   4) add_lag_rolling(daily)          → lag 1/2/3, rolling 3/7, news rolling
   5) update_coin(coin)               → eksik günler: fetch → score → aggregate → historical ile concat → parquet
@@ -470,7 +473,9 @@ class NLPEnsemble:
 
     Model yüklemesi lazy: ilk score_batch çağrısında yapılır.
     Her model için score = P(positive) - P(negative) ∈ [-1, +1].
-    combined_score = (score_fb + score_cb + score_jh) / 3.
+    combined_score = jh-only (V4 NLP combo ablation winner — S1 portfolio
+    Sharpe +1.38, return +183%, alpha +193 pp). fb/cb skorları diagnostics
+    için yine kayda geçer ama combined'da kullanılmaz.
 
     J-Hartmann 7 duygu döner; biz bunları pos/neg/neu kovalarına haritalarız:
         joy, surprise          → pos
@@ -600,7 +605,11 @@ class NLPEnsemble:
         fb_arr = np.asarray(fb_scores)
         cb_arr = np.asarray(cb_scores)
         jh_arr = np.asarray(jh_scores)
-        combined = (fb_arr + cb_arr + jh_arr) / 3.0
+        # Winner of V4 NLP combo ablation (S1) = jhartmann-only.
+        # combined_score deploys jh-only so live sentiment matches the
+        # production v4 model's training distribution. fb/cb scores are
+        # still logged for diagnostics + future ablations.
+        combined = jh_arr
 
         return pd.DataFrame({
             "score_fb":       fb_arr,
