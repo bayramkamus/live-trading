@@ -245,70 +245,98 @@ def tab_portfolio() -> None:
 # ============================================================
 
 def _match_roundtrips(tr: pd.DataFrame) -> pd.DataFrame:
-    """FIFO: her coin için BUY → SELL roundtrip'lerini eşleştir.
+    """FIFO: her coin için LONG ve SHORT roundtrip'lerini ayrı eşleştir.
 
-    Paper broker single-position-per-coin modda; yani bir coinin BUY'u
-    sonraki SELL tarafından (kısmen/tümüyle) kapatılır. Burada sırayla
-    FIFO queue tutarak kapatılmış roundtrip'leri çıkarıyoruz.
+    Trade side dilini paper_broker tanımlar:
+        BUY_OPEN     — LONG açılış
+        SELL_CLOSE   — LONG kapanış      (LONG roundtrip kapatır)
+        SELL_OPEN    — SHORT açılış
+        BUY_COVER    — SHORT kapanış     (SHORT roundtrip kapatır)
+    Eski "BUY"/"SELL" formatı da fallback olarak desteklenir (eski trades.csv).
+
+    LONG PnL  = (close_px − open_px) × qty                  → fiyat artarsa kâr
+    SHORT PnL = (open_px  − close_px) × qty                 → fiyat düşerse kâr
+    pnl_pct dönüş yüzdesi olarak yöne göre hesaplanır.
+
     Dönüş: her satır bir tam kapatılmış pozisyon.
-        coin, open_date, close_date, qty, entry, exit, days, pnl, pnl_pct
+        coin, side (LONG/SHORT), open_date, close_date, qty,
+        entry, exit, days, pnl, pnl_pct
     """
+    cols = ["coin", "side", "open_date", "close_date", "qty",
+            "entry", "exit", "days", "pnl", "pnl_pct"]
     if tr.empty:
-        return pd.DataFrame(columns=[
-            "coin", "open_date", "close_date", "qty",
-            "entry", "exit", "days", "pnl", "pnl_pct",
-        ])
+        return pd.DataFrame(columns=cols)
 
     tr2 = tr.copy()
     tr2["date"] = pd.to_datetime(tr2["date"], errors="coerce")
     tr2 = tr2.sort_values(["coin", "date"]).reset_index(drop=True)
 
-    rows = []
-    # coin başına BUY queue'sü: (date, qty_remaining, price)
     from collections import deque, defaultdict
-    queues: dict[str, deque] = defaultdict(deque)
+    long_q:  dict[str, deque] = defaultdict(deque)   # coin → BUY_OPEN kuyruğu
+    short_q: dict[str, deque] = defaultdict(deque)   # coin → SELL_OPEN kuyruğu
+
+    rows: list[dict] = []
+
+    def _close_against(queue: deque, direction: str, coin: str,
+                       close_qty: float, close_px: float, close_dt) -> None:
+        """Verilen kuyruktan FIFO sırada eşleştir, roundtrip satırları üret."""
+        remaining = close_qty
+        while remaining > 1e-12 and queue:
+            o_dt, o_q, o_px = queue[0]
+            take = min(o_q, remaining)
+            if direction == "LONG":
+                pnl = (close_px - o_px) * take
+                pct = 100 * (close_px / o_px - 1) if o_px else 0.0
+            else:  # SHORT
+                pnl = (o_px - close_px) * take
+                pct = 100 * (o_px / close_px - 1) if close_px else 0.0
+            try:
+                days = max((close_dt.normalize() - o_dt.normalize()).days, 0) \
+                    if pd.notna(close_dt) and pd.notna(o_dt) else 0
+            except Exception:
+                days = 0
+            rows.append({
+                "coin": coin,
+                "side": direction,
+                "open_date":  o_dt.date().isoformat() if pd.notna(o_dt) else "",
+                "close_date": close_dt.date().isoformat() if pd.notna(close_dt) else "",
+                "qty":     round(take, 6),
+                "entry":   o_px,
+                "exit":    close_px,
+                "days":    int(days),
+                "pnl":     round(pnl, 2),
+                "pnl_pct": round(pct, 3),
+            })
+            queue[0][1] = o_q - take
+            if queue[0][1] <= 1e-12:
+                queue.popleft()
+            remaining -= take
 
     for _, r in tr2.iterrows():
-        side = str(r.get("side", "")).upper()
+        side = str(r.get("side", "")).upper().strip()
         coin = str(r.get("coin", ""))
         q    = float(r.get("qty", 0) or 0)
         px   = float(r.get("price", 0) or 0)
         dt   = r.get("date")
+        if q <= 0 or coin == "":
+            continue
 
-        if side == "BUY":
-            queues[coin].append([dt, q, px])
+        if side in ("BUY_OPEN",):
+            long_q[coin].append([dt, q, px])
+        elif side in ("SELL_OPEN",):
+            short_q[coin].append([dt, q, px])
+        elif side in ("SELL_CLOSE",):
+            _close_against(long_q[coin], "LONG", coin, q, px, dt)
+        elif side in ("BUY_COVER",):
+            _close_against(short_q[coin], "SHORT", coin, q, px, dt)
+        # ---- legacy fallback (eski "BUY"/"SELL" yalnız LONG akışı) ----
+        elif side == "BUY":
+            long_q[coin].append([dt, q, px])
         elif side == "SELL":
-            sell_q = q
-            while sell_q > 1e-12 and queues[coin]:
-                o_dt, o_q, o_px = queues[coin][0]
-                take = min(o_q, sell_q)
-                entry_cost = take * o_px
-                exit_val   = take * px
-                pnl = exit_val - entry_cost
-                pnl_pct = 100 * (px / o_px - 1) if o_px else 0
-                # gün farkı (negatifse aynı gün için 0)
-                try:
-                    days = max((dt.normalize() - o_dt.normalize()).days, 0) \
-                        if pd.notna(dt) and pd.notna(o_dt) else 0
-                except Exception:
-                    days = 0
-                rows.append({
-                    "coin": coin,
-                    "open_date":  o_dt.date().isoformat() if pd.notna(o_dt) else "",
-                    "close_date": dt.date().isoformat()   if pd.notna(dt)   else "",
-                    "qty":   round(take, 6),
-                    "entry": o_px,
-                    "exit":  px,
-                    "days":  int(days),
-                    "pnl":   round(pnl, 2),
-                    "pnl_pct": round(pnl_pct, 3),
-                })
-                queues[coin][0][1] = o_q - take
-                if queues[coin][0][1] <= 1e-12:
-                    queues[coin].popleft()
-                sell_q -= take
+            _close_against(long_q[coin], "LONG", coin, q, px, dt)
+        # bilinmeyen side'lar atlanır
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=cols)
 
 
 def tab_history() -> None:
@@ -372,7 +400,7 @@ def tab_history() -> None:
                   f"${avg_win:,.2f} / ${avg_loss:,.2f}")
         k5.metric("Ort. tutma", f"{avg_days:.1f} gün")
 
-        k6, k7 = st.columns(2)
+        k6, k7, k8 = st.columns(3)
         pf_txt = "∞" if profit_factor == float("inf") else f"{profit_factor:.2f}"
         k6.metric("Profit factor", pf_txt,
                   help="Toplam kazanç / toplam kayıp. >1 karlı.")
@@ -381,6 +409,17 @@ def tab_history() -> None:
             k7.metric("En iyi işlem",
                       f"{best['coin']} +${best['pnl']:,.2f}",
                       delta=f"{best['pnl_pct']:+.2f}%")
+
+        # LONG vs SHORT kırılımı
+        if "side" in rt.columns:
+            n_long  = int((rt["side"] == "LONG").sum())
+            n_short = int((rt["side"] == "SHORT").sum())
+            pnl_long  = float(rt.loc[rt["side"] == "LONG",  "pnl"].sum())
+            pnl_short = float(rt.loc[rt["side"] == "SHORT", "pnl"].sum())
+            k8.metric("LONG / SHORT (adet · PnL)",
+                      f"{n_long}L / {n_short}S",
+                      delta=f"${pnl_long:+,.0f} / ${pnl_short:+,.0f}",
+                      help="Yöne göre kapanmış işlem sayısı ve toplam realized PnL.")
 
         # Cumulative PnL zaman içinde
         rt_sorted = rt.sort_values("close_date").copy()
@@ -395,9 +434,14 @@ def tab_history() -> None:
         show_rt = rt.sort_values("close_date", ascending=False).copy()
         show_rt["result"] = show_rt["pnl"].apply(
             lambda v: "🟢 WIN" if v > 0 else ("🔴 LOSS" if v < 0 else "⚪ FLAT"))
-        disp = show_rt[["coin", "open_date", "close_date", "days",
+        # "side" kolonu eski roundtrip dataframe'inde olmayabilir → güvenli al
+        if "side" not in show_rt.columns:
+            show_rt["side"] = "LONG"
+        show_rt["side_label"] = show_rt["side"].map(
+            {"LONG": "🟢 LONG", "SHORT": "🔴 SHORT"}).fillna(show_rt["side"])
+        disp = show_rt[["coin", "side_label", "open_date", "close_date", "days",
                         "qty", "entry", "exit", "pnl", "pnl_pct", "result"]].copy()
-        disp.columns = ["Coin", "Açılış", "Kapanış", "Gün",
+        disp.columns = ["Coin", "Yön", "Açılış", "Kapanış", "Gün",
                         "Adet", "Giriş", "Çıkış", "PnL ($)", "PnL (%)", "Sonuç"]
         raw_pnl = show_rt["pnl"].values
         for c in ("Adet",):
@@ -429,9 +473,19 @@ def tab_history() -> None:
     def _side_color(row):
         i = row.name
         s = str(raw_side[i]).upper() if i < len(raw_side) else ""
-        if s == "BUY":
+        # LONG açılış → koyu yeşil; LONG kapanış → açık yeşil/kırmızı (PnL'e göre)
+        # SHORT açılış → kırmızı; SHORT kapanış (cover) → mavi/yeşil
+        if s == "BUY_OPEN":
+            c = "#16a34a22"     # LONG aç (yeşil)
+        elif s == "SELL_CLOSE":
+            c = "#16a34a14"     # LONG kapa (açık yeşil)
+        elif s == "SELL_OPEN":
+            c = "#dc262622"     # SHORT aç (kırmızı)
+        elif s == "BUY_COVER":
+            c = "#dc262614"     # SHORT kapa (açık kırmızı)
+        elif s == "BUY":         # legacy
             c = "#16a34a14"
-        elif s == "SELL":
+        elif s == "SELL":        # legacy
             c = "#dc262614"
         else:
             c = "transparent"

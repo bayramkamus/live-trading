@@ -10,7 +10,15 @@ Sabitler:
     FEE_BPS              = 10 bps (0.10% per fill)
     MAX_POSITIONS        = 5 (aynı anda açık tutulacak max pozisyon sayısı)
     RISK_PCT_PER_TRADE   = 0.10 (her emir için equity %10'u)
-    ALLOW_SHORTS         = False (long-only, V4 default)
+    ALLOW_SHORTS         = True  (long + short — sinyal politikasıyla simetrik)
+
+Pozisyon politikası (step() içinde uygulanır):
+    - Bir coinde açık pozisyon varsa AYNI coin için yeni pozisyon açılmaz
+      (taşınır; ters sinyale kadar). Aynı yönde tekrarlı sinyaller no-op.
+    - FLAT iken BUY (+1) → LONG aç; FLAT iken SELL (−1) → SHORT aç.
+    - LONG iken SELL (−1) → kapat (realized PnL).
+    - SHORT iken BUY (+1) → cover (realized PnL).
+    - HOLD (0) → mevcut pozisyon korunur.
 
 Fiyat kaynağı: son close (ohlcv_fetcher zaten günlük kline yazıyor);
 bu modül sadece dışarıdan verilen fiyatları kullanır.
@@ -42,7 +50,7 @@ BASE_EQUITY        = 10_000.0
 FEE_BPS            = 10.0          # 0.10%
 RISK_PCT_PER_TRADE = 0.10          # equity'nin %10'u
 MAX_POSITIONS      = 5
-ALLOW_SHORTS       = False
+ALLOW_SHORTS       = True          # SELL → SHORT aç, BUY → cover (realize)
 
 TRADE_HEADER  = ["date", "coin", "side", "qty", "price", "fee",
                  "gross", "realized_pnl", "note"]
@@ -221,11 +229,18 @@ class PaperBroker(BrokerAdapter):
 
     def step(self, signals: Dict[str, int], prices: Dict[str, float],
              date: str) -> list[Trade]:
-        """Signals → emirler. Basit long-only politika:
+        """Signals → emirler. Long + Short simetrik politika:
 
-            signal == +1  → FLAT ise LONG aç
-            signal == -1  → LONG ise kapat (short kapalıysa yeni SHORT açma)
-            signal == 0   → değişiklik yok
+            FLAT  + BUY  (+1) → LONG aç
+            FLAT  + SELL (−1) → SHORT aç (allow_shorts=True ise)
+            LONG  + SELL (−1) → kapat (realized PnL)
+            SHORT + BUY  (+1) → cover  (realized PnL)
+            *     + HOLD ( 0) → değişiklik yok (pozisyon taşınır)
+            LONG  + BUY,  SHORT + SELL → no-op (aynı yön; pozisyon zaten açık,
+                                                 ÜZERİNE EKLENMEZ)
+
+        Ters sinyal geldiğinde önce kapatma yapılır → sermaye serbest kalır →
+        aynı tur içinde başka bir coinde yeni pozisyon açılabilir.
         """
         trades: list[Trade] = []
 
