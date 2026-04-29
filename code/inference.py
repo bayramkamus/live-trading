@@ -96,13 +96,40 @@ def build_feature_row(coin: str, as_of_date) -> tuple[pd.Series, dict]:
 
 # ---------- predict ----------
 
+# Default kapı parametreleri (A3'te config.py'a taşınacak).
+DIR_MARGIN_DEFAULT = 0.03   # min(p_dir - p_other_dir)
+HOLD_VETO_DEFAULT  = 0.05   # max(p_hold - p_dir)
+# Weak set (production training f1<0.25 veya best_iter<=1) icin siki kapilar
+WEAK_COINS         = {"ADA", "AVAX", "DOT", "ETH", "LINK", "LTC"}
+DIR_MARGIN_WEAK    = 0.06
+HOLD_VETO_WEAK     = 0.00
+
+
 def _signal_from_probs(p_sell: float, p_hold: float, p_buy: float,
-                       buy_th: float, sell_th: float) -> int:
+                       buy_th: float, sell_th: float,
+                       dir_margin: float = DIR_MARGIN_DEFAULT,
+                       hold_veto: float = HOLD_VETO_DEFAULT) -> tuple[int, str]:
+    """3-kapi sinyal kurali. Donus: (signal_int, reason).
+    BUY  iff: p_buy  >= buy_th AND  (p_buy  - p_sell) >= dir_margin
+                                AND (p_hold - p_buy)  <= hold_veto
+    SELL iff: p_sell >= sell_th AND (p_sell - p_buy)  >= dir_margin
+                                AND (p_hold - p_sell) <= hold_veto
+    Diger: HOLD."""
+    # BUY denemesi
     if p_buy >= buy_th and p_buy > p_sell:
-        return 1
+        if (p_buy - p_sell) < dir_margin:
+            return 0, "blocked_margin_buy"
+        if (p_hold - p_buy) > hold_veto:
+            return 0, "blocked_hold_veto_buy"
+        return 1, "buy"
+    # SELL denemesi
     if p_sell >= sell_th and p_sell > p_buy:
-        return -1
-    return 0
+        if (p_sell - p_buy) < dir_margin:
+            return 0, "blocked_margin_sell"
+        if (p_hold - p_sell) > hold_veto:
+            return 0, "blocked_hold_veto_sell"
+        return -1, "sell"
+    return 0, "below_threshold"
 
 
 def predict_signal_from_row(coin: str, feature_row: pd.Series,
@@ -116,9 +143,17 @@ def predict_signal_from_row(coin: str, feature_row: pd.Series,
 
     proba = artifacts["model"].predict(x)[0]
     p_sell, p_hold, p_buy = float(proba[0]), float(proba[1]), float(proba[2])
-    sig_int = _signal_from_probs(p_sell, p_hold, p_buy,
-                                 buy_th=artifacts["buy_th"],
-                                 sell_th=artifacts["sell_th"])
+
+    # Per-coin gate parametreleri: weak ise siki, degilse default
+    is_weak = coin in WEAK_COINS
+    dir_margin = DIR_MARGIN_WEAK if is_weak else DIR_MARGIN_DEFAULT
+    hold_veto  = HOLD_VETO_WEAK  if is_weak else HOLD_VETO_DEFAULT
+
+    sig_int, gate_reason = _signal_from_probs(
+        p_sell, p_hold, p_buy,
+        buy_th=artifacts["buy_th"], sell_th=artifacts["sell_th"],
+        dir_margin=dir_margin, hold_veto=hold_veto,
+    )
     sig_txt = {1: "BUY", 0: "HOLD", -1: "SELL"}[sig_int]
 
     return {
@@ -132,6 +167,10 @@ def predict_signal_from_row(coin: str, feature_row: pd.Series,
         "sell_th": artifacts["sell_th"],
         "horizon": artifacts["horizon"],
         "n_features": len(feat_cols),
+        "gate_reason": gate_reason,
+        "gate_dir_margin": dir_margin,
+        "gate_hold_veto": hold_veto,
+        "coin_tier": "weak" if is_weak else "strong",
     }
 
 

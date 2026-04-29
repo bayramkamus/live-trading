@@ -33,6 +33,11 @@ import ohlcv_fetcher
 import macro_fetcher
 import sentiment_pipeline
 import inference
+from feature_builders import load_sentiment_features
+
+# A2: haber kapsam gating — A3'te config.py'a tasinacak
+NEWS_MIN_LAST7D     = 3   # 7 gun toplam haber sayisi minimum
+NEWS_STALE_DAYS_MAX = 2   # son haberden bu yana max gun
 
 
 def _latest_complete_day_utc() -> pd.Timestamp:
@@ -51,6 +56,26 @@ def _gate_missing_features(out: dict) -> tuple[dict, str | None]:
     out["signal"] = "HOLD"
     out["signal_int"] = 0
     return out, f"missing_features:{','.join(missing)}"
+
+
+def _gate_news_coverage(coin: str, as_of_date: pd.Timestamp) -> str | None:
+    """Sentiment row'da haber kapsami yetersiz mi? None=ok, str=block reason."""
+    try:
+        sent = load_sentiment_features(coin)
+        row = sent.loc[sent["date"] == as_of_date]
+        if row.empty:
+            return "no_sentiment_row"
+        r = row.iloc[0]
+        # 7-gun pencere icin (sentiment_pipeline) total_news_count + days_since_news kullan
+        total_news_7d = float(r.get("total_news_count", 0) or 0)
+        days_since = float(r.get("days_since_news", 999) or 999)
+        if total_news_7d < NEWS_MIN_LAST7D:
+            return f"low_news_count({int(total_news_7d)}<{NEWS_MIN_LAST7D})"
+        if days_since > NEWS_STALE_DAYS_MAX:
+            return f"stale_news({int(days_since)}d>{NEWS_STALE_DAYS_MAX})"
+        return None
+    except Exception:
+        return None  # gating hatasinda blokla degil
 
 
 def run(as_of_date: str | None = None, skip_update: bool = False,
@@ -88,7 +113,21 @@ def run(as_of_date: str | None = None, skip_update: bool = False,
     for coin in COINS:
         try:
             out = inference.predict_signal_for_date(coin, target)
+            # 1) missing-feature gate (A1)
             out, reason = _gate_missing_features(out)
+            # 2) news-coverage gate (A2) — sadece sinyal aktif iken kontrol et
+            if reason is None and out.get("signal_int", 0) != 0:
+                news_block = _gate_news_coverage(coin, target)
+                if news_block:
+                    out["signal"] = "HOLD"
+                    out["signal_int"] = 0
+                    reason = news_block
+            # 3) gate_reason (3-kapi sonucu) zaten predict'ten geldi; HOLD ise
+            #    gate_reason='blocked_*' veya 'below_threshold'
+            if reason is None and out.get("signal_int", 0) == 0:
+                gr = out.get("gate_reason", "below_threshold")
+                if gr.startswith("blocked_"):
+                    reason = gr
             out["reason"] = reason or "ok"
             if reason:
                 n_gated += 1
