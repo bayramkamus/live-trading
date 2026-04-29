@@ -28,15 +28,16 @@ MIN_CONFIDENCE = 0.0  # p_buy/p_sell için minimum; 0 → filtre yok
 # Fiyat kaynağı
 # ============================================================
 
-def _read_tech_close(coin: str, as_of_date: pd.Timestamp) -> Optional[float]:
-    """Tech parquet'inde 'close' kolonu yok — OHLCV fetcher sadece feature yazıyor.
-    Fiyat için data_live/ohlcv/{coin}_1d.parquet'ı okuruz (varsa)."""
+def _read_tech_close(coin: str, target_date: pd.Timestamp,
+                     strict: bool = False) -> Optional[float]:
+    """data_live/ohlcv/{coin}_1d.parquet -> target_date close.
+    strict=True: tam target_date eslemesi sart (T+1 fill icin).
+    strict=False: en yakin gecmis ile fallback (legacy)."""
     ohlcv_dir = DATA_LIVE / "ohlcv"
     p = ohlcv_dir / f"{coin}_1d.parquet"
     if not p.exists():
         return None
     df = pd.read_parquet(p)
-    # Expected kolon: close (Binance kline[4])
     if "close" not in df.columns:
         return None
     dc = pd.to_datetime(df["date"])
@@ -44,10 +45,11 @@ def _read_tech_close(coin: str, as_of_date: pd.Timestamp) -> Optional[float]:
         dc = dc.dt.tz_convert("UTC").dt.tz_localize(None)
     dc = dc.dt.normalize()
     df = df.assign(date=dc)
-    row = df.loc[df["date"] == as_of_date]
+    row = df.loc[df["date"] == target_date]
     if row.empty:
-        # en yakın geçmiş
-        past = df.loc[df["date"] <= as_of_date]
+        if strict:
+            return None
+        past = df.loc[df["date"] <= target_date]
         if past.empty:
             return None
         row = past.tail(1)
@@ -60,13 +62,15 @@ def _fallback_close_from_tech(coin: str, as_of_date: pd.Timestamp) -> Optional[f
     return None
 
 
-def build_price_map(coins: list[str], as_of_date) -> Dict[str, float]:
-    as_of_date = pd.Timestamp(as_of_date).normalize()
+def build_price_map(coins: list[str], fill_date,
+                    strict: bool = True) -> Dict[str, float]:
+    """fill_date close'unu OHLCV parquet'ten oku - fill price.
+    strict=True (default): tam fill_date sart, gelecek/yok ise coin atlanir.
+    strict=False: en yakin gecmis fallback (debug/replay)."""
+    fill_date = pd.Timestamp(fill_date).normalize()
     out: Dict[str, float] = {}
     for c in coins:
-        px = _read_tech_close(c, as_of_date)
-        if px is None:
-            px = _fallback_close_from_tech(c, as_of_date)
+        px = _read_tech_close(c, fill_date, strict=strict)
         if px is not None:
             out[c] = float(px)
     return out
@@ -96,34 +100,38 @@ def _passes_confidence(row: pd.Series, min_conf: float) -> bool:
 
 def execute_signals(signals_df: pd.DataFrame,
                     as_of_date: Optional[str] = None,
+                    fill_date: Optional[str] = None,
                     broker: Optional[BrokerAdapter] = None,
                     min_confidence: float = MIN_CONFIDENCE,
                     prices: Optional[Dict[str, float]] = None,
                     save: bool = True) -> list[Trade]:
-    """Bir günlük sinyal tablosu alır, broker.step() çalıştırır."""
+    """Sinyal tablosu -> broker.step().
+    Lookahead-safe: as_of_date = sinyal gunu (T), fill_date = doldurma gunu (T+1)."""
     if as_of_date is None:
         as_of_date = pd.Timestamp.utcnow().date().isoformat()
+    if fill_date is None:
+        fill_date = as_of_date  # legacy same-day
 
     if broker is None:
         broker = PaperBroker.load_or_init()
 
-    # Coin → signal map (confidence filter uygula)
     sig_map: Dict[str, int] = {}
     for _, row in signals_df.iterrows():
         coin = str(row["coin"])
         sig_map[coin] = _signal_int(row) if _passes_confidence(row, min_confidence) else 0
 
-    # Fiyat haritası
+    # Fill price = fill_date close (strict)
     if prices is None:
-        prices = build_price_map(list(sig_map.keys()), as_of_date)
+        prices = build_price_map(list(sig_map.keys()), fill_date, strict=True)
 
     missing = [c for c in sig_map if c not in prices and sig_map[c] != 0]
     if missing:
-        print(f"[execute] fiyat yok → sinyaller atlanacak: {missing}")
+        print(f"[execute] fill_date={fill_date} fiyati yok -> sinyaller atlandi: {missing}")
         for c in missing:
-            sig_map[c] = 0  # bilinmeyen fiyatla emir verme
+            sig_map[c] = 0
 
-    trades = broker.step(sig_map, prices, date=str(as_of_date))
+    # Trade tarihi = fill_date (lookahead onleme)
+    trades = broker.step(sig_map, prices, date=str(fill_date))
 
     if save:
         broker.save()

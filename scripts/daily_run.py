@@ -157,15 +157,21 @@ def _sync_broker_to_db(db: DB) -> None:
 def run(as_of_date: Optional[str] = None,
         skip_update: bool = False,
         execute: bool = True,
-        dry_run: bool = False) -> int:
-    """0 dönerse başarılı, >0 ise hatalı çıkış kodu."""
+        dry_run: bool = False,
+        fill_offset: int = 1) -> int:
+    """0 dönerse başarılı, >0 ise hatalı çıkış kodu.
 
-    # Log dosyası
-    today = as_of_date or pd.Timestamp.utcnow().date().isoformat()
+    fill_offset: T+1 fill için varsayılan 1.
+                 0 verirsen same-day (legacy) fill — debug için.
+    """
+
+    # Log dosyası — orchestrate.run() içeriden as_of_date'i çözer (None → T-1-fill_offset)
+    run_tag = as_of_date or pd.Timestamp.utcnow().date().isoformat()
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = LOGS_DIR / f"daily_{today}.log"
+    log_file = LOGS_DIR / f"daily_{run_tag}.log"
 
-    _log(f"=== daily_run  date={today}  skip_update={skip_update}  execute={execute}  dry_run={dry_run} ===", log_file)
+    _log(f"=== daily_run  run_tag={run_tag}  fill_offset={fill_offset}  "
+         f"skip_update={skip_update}  execute={execute}  dry_run={dry_run} ===", log_file)
 
     errors = []
 
@@ -185,28 +191,32 @@ def run(as_of_date: Optional[str] = None,
                 _log(msg, log_file)
                 errors.append({"step": step_name, "error": str(e)})
 
-    # 2) inference — orchestrate.run() zaten signals_*.csv yazıyor
+    # 2) inference — orchestrate.run() signal_date/fill_date'i kendi seçer
     import orchestrate  # noqa
+    df = pd.DataFrame()
+    signal_date = run_tag
     try:
         _log("→ inference + execute...", log_file)
-        df = orchestrate.run(as_of_date=today,
-                             skip_update=True,       # zaten yukarıda güncelledik
+        df = orchestrate.run(as_of_date=as_of_date,   # None → orchestrate çözer
+                             skip_update=True,
                              execute=execute,
-                             min_confidence=float(os.environ.get("MIN_CONFIDENCE", "0")))
+                             min_confidence=float(os.environ.get("MIN_CONFIDENCE", "0")),
+                             fill_offset=fill_offset)
+        if not df.empty and "signal_date" in df.columns:
+            signal_date = str(df["signal_date"].iloc[0])
     except Exception as e:
         _log(f"[inference] HATA: {e}\n{traceback.format_exc()}", log_file)
         errors.append({"step": "inference", "error": str(e)})
-        df = pd.DataFrame()
 
     # 3) DB'ye yansıt
     if not dry_run:
         try:
             with DB() as db:
                 db.init()
-                # signals
+                # signals — gerçek signal_date kullan (T-2 olabilir)
                 if not df.empty:
-                    n = db.write_signals(df, as_of_date=today)
-                    _log(f"[db] signals upsert: {n}", log_file)
+                    n = db.write_signals(df, as_of_date=signal_date)
+                    _log(f"[db] signals upsert: {n}  signal_date={signal_date}", log_file)
                 # cache mirror
                 counts = _sync_caches_to_db(db)
                 _log(f"[db] cache mirror: {counts}", log_file)
@@ -219,7 +229,7 @@ def run(as_of_date: Optional[str] = None,
                 _log(f"[db] retention: {pruned}", log_file)
                 # meta
                 db.set_meta("last_run", datetime.utcnow().isoformat(timespec="seconds"))
-                db.set_meta("last_date", today)
+                db.set_meta("last_date", signal_date)
         except Exception as e:
             _log(f"[db] HATA: {e}\n{traceback.format_exc()}", log_file)
             errors.append({"step": "db", "error": str(e)})
@@ -227,7 +237,7 @@ def run(as_of_date: Optional[str] = None,
     # 4) özet
     if errors:
         _log(f"=== HATA: {len(errors)} adım başarısız ===", log_file)
-        (LOGS_DIR / f"errors_{today}.json").write_text(
+        (LOGS_DIR / f"errors_{run_tag}.json").write_text(
             json.dumps(errors, indent=2, ensure_ascii=False))
         return 1
 
@@ -237,12 +247,21 @@ def run(as_of_date: Optional[str] = None,
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--date", default=None, help="YYYY-MM-DD (default: bugün UTC)")
+    ap.add_argument("--date", default=None,
+                    help="signal as_of_date YYYY-MM-DD (default: orchestrate auto)")
+    ap.add_argument("--fill-offset", type=int, default=1,
+                    help="fill_date = as_of_date + N gun (default 1=T+1; 0=same-day)")
     ap.add_argument("--skip-update", action="store_true",
-                    help="fetcher'ları atla, sadece inference")
-    ap.add_argument("--no-execute", dest="execute", action="store_false", default=True,
-                    help="PaperBroker'a yazma (sadece sinyal)")
-    ap.add_argument("--dry-run", action="store_true", help="DB'ye yazma")
+                    help="Veri fetcher'lari atla")
+    ap.add_argument("--no-execute", action="store_true",
+                    help="PaperBroker'a uygulama")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="DB / broker yazma; sadece signals_*.csv ve log uret")
     args = ap.parse_args()
-    rc = run(args.date, args.skip_update, args.execute, args.dry_run)
+
+    rc = run(as_of_date=args.date,
+             skip_update=args.skip_update,
+             execute=not args.no_execute,
+             dry_run=args.dry_run,
+             fill_offset=args.fill_offset)
     sys.exit(rc)

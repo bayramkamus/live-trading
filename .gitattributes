@@ -1,0 +1,4 @@
+*.lgb binary
+*.parquet binary
+*.db binary
+*.db-journal binary

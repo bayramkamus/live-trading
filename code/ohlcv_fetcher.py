@@ -199,19 +199,37 @@ def fetch_cryptocompare_ohlcv(symbol: str, interval: str,
     return df[["open_time", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
 
+_INTERVAL_DELTA = {
+    "1d": pd.Timedelta(days=1),
+    "4h": pd.Timedelta(hours=4),
+    "1h": pd.Timedelta(hours=1),
+}
+
+
+def _drop_incomplete_candles(df: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """In-progress (henuz kapanmamis) mum cubugunu at - lookahead onleme."""
+    if df.empty or "open_time" not in df.columns:
+        return df
+    delta = _INTERVAL_DELTA.get(interval)
+    if delta is None:
+        return df
+    now = pd.Timestamp.utcnow().tz_localize(None)
+    out = df[pd.to_datetime(df["open_time"]) + delta <= now].copy()
+    dropped = len(df) - len(out)
+    if dropped > 0:
+        print(f"[incomplete-candle] {interval}: {dropped} satir atildi")
+    return out.reset_index(drop=True)
+
+
 def fetch_klines(symbol: str, interval: str,
                  start_ms: int, end_ms: Optional[int] = None,
                  limit: int = 1000) -> pd.DataFrame:
-    """Wrapper: Binance birinci, başarısız (boş/451) ise CryptoCompare fallback.
-
-    GitHub Actions runner'ları US-based, Binance ABD'den geo-blocked (HTTP 451).
-    Bu wrapper sayesinde workflow erişebildiği kaynaktan veri çeker.
-    """
+    """Binance birinci, fallback CryptoCompare; in-progress mum cikarilir."""
     df = fetch_binance_klines(symbol, interval, start_ms, end_ms, limit)
-    if not df.empty:
-        return df
-    print(f"[fallback] {symbol} {interval} → CryptoCompare")
-    return fetch_cryptocompare_ohlcv(symbol, interval, start_ms, end_ms)
+    if df.empty:
+        print(f"[fallback] {symbol} {interval} -> CryptoCompare")
+        df = fetch_cryptocompare_ohlcv(symbol, interval, start_ms, end_ms)
+    return _drop_incomplete_candles(df, interval)
 
 
 # ============================================================
