@@ -23,3 +23,9 @@ logs/news_coverage_*.csv
 news_debug.log
 
 logs/signals_*.csv
+
+# A4: replay broker, geçici dosyalar
+data_live/broker_replay/
+data_live/broker/state.bak.json
+logs/daily_*.log
+data_live/.fuse_hidden*
