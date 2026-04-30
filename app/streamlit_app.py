@@ -118,12 +118,23 @@ def load_decisions(days: int = 30) -> pd.DataFrame:
 # ============================================================
 
 def header() -> None:
-    col1, col2, col3 = st.columns([3, 2, 2])
+    col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
     col1.title("📈 V4 Crypto Signals")
+
     last_run = load_meta("last_run") or "—"
     last_date = load_meta("last_date") or "—"
-    col2.metric("Son güncelleme", last_run.split("T")[0] if "T" in last_run else last_run)
+    last_mv = load_meta("last_model_version") or "—"
+    last_mca = load_meta("last_model_created_at") or ""
+
+    col2.metric("Son güncelleme",
+                last_run.split("T")[0] if "T" in last_run else last_run)
     col3.metric("Son sinyal tarihi", last_date)
+    # A5.3: aktif model versiyonu
+    mv_label = last_mv if last_mv == "—" else last_mv[:12]
+    mv_delta = last_mca.split("T")[0] if "T" in last_mca else (last_mca or None)
+    col4.metric("Aktif model", mv_label, delta=mv_delta,
+                delta_color="off",
+                help="last_model_version (artifact_hash) + production training tarihi")
 
     if not DB_PATH.exists():
         st.error(f"DB yok: {DB_PATH}. Önce `python scripts/daily_run.py` çalıştır.")
@@ -638,7 +649,8 @@ def main() -> None:
             st.rerun()
         st.caption(f"DB: `{DB_PATH}`")
         st.caption("**Meta**")
-        for k in ("last_run", "last_date", "last_model_version"):
+        for k in ("last_run", "last_date",
+                  "last_model_version", "last_model_created_at"):
             v = load_meta(k)
             if v:
                 st.caption(f"{k}: `{v}`")
