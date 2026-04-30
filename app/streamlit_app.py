@@ -165,19 +165,41 @@ def tab_signals() -> None:
     c3.metric("HOLD", int(counts.get("HOLD", 0)))
     c4.metric("Toplam", len(today))
 
-    # Tablo
-    show = today[["coin", "signal", "p_buy", "p_hold", "p_sell",
-                  "buy_th", "sell_th", "horizon"]].copy()
-    show.columns = ["Coin", "Sinyal", "P(BUY)", "P(HOLD)", "P(SELL)",
-                    "buy_th", "sell_th", "horizon"]
+    # Tablo — A5.4: Reason + Tier kolonlari (A2/A4 meta)
+    base_cols = ["coin", "signal", "p_buy", "p_hold", "p_sell",
+                 "buy_th", "sell_th", "horizon"]
+    extra_cols = []
+    if "reason" in today.columns:
+        extra_cols.append("reason")
+    if "coin_tier" in today.columns:
+        extra_cols.append("coin_tier")
+    show = today[base_cols + extra_cols].copy()
+
+    rename_map = {
+        "coin": "Coin", "signal": "Sinyal",
+        "p_buy": "P(BUY)", "p_hold": "P(HOLD)", "p_sell": "P(SELL)",
+        "buy_th": "buy_th", "sell_th": "sell_th", "horizon": "horizon",
+        "reason": "Reason", "coin_tier": "Tier",
+    }
+    show = show.rename(columns=rename_map)
+
     for c in ("P(BUY)", "P(HOLD)", "P(SELL)", "buy_th", "sell_th"):
         show[c] = show[c].apply(lambda v: f"{v:.3f}" if pd.notna(v) else "—")
+
+    if "Tier" in show.columns:
+        tier_emoji = {"strong": "🟢 strong", "weak": "🔴 weak"}
+        show["Tier"] = show["Tier"].apply(
+            lambda v: tier_emoji.get(str(v).lower(), "—") if pd.notna(v) else "—"
+        )
+    if "Reason" in show.columns:
+        show["Reason"] = show["Reason"].fillna("—").replace("", "—")
 
     def _color(row):
         c = SIGNAL_COLOR.get(row["Sinyal"], "#6b7280")
         return [f"background-color: {c}1a"] * len(row)
 
-    st.dataframe(show.style.apply(_color, axis=1), use_container_width=True, hide_index=True)
+    st.dataframe(show.style.apply(_color, axis=1),
+                 use_container_width=True, hide_index=True)
 
     # Son 30 gün özet
     st.subheader("Son 30 gün — günlük sinyal dağılımı")
