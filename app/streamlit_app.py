@@ -105,6 +105,14 @@ def load_last_closes() -> dict:
     return out
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_decisions(days: int = 30) -> pd.DataFrame:
+    """A5.2: broker_decisions tablosundan kararlari oku."""
+    with DB() as db:
+        db.init()
+        return db.read_decisions(days=days)
+
+
 # ============================================================
 # Header
 # ============================================================
@@ -516,20 +524,112 @@ def tab_history() -> None:
 
 
 # ============================================================
+# Tab 4 — Kararlar (A5.2)
+# ============================================================
+
+def _categorize_reason(r) -> str:
+    """broker_decisions.reason -> kategori (gate dagilimi icin)."""
+    if r is None or r == "" or r == "ok":
+        return "✅ ok"
+    s = str(r)
+    if s.startswith("missing_features"):  return "⚠️ missing_features"
+    if s.startswith("low_news_count"):    return "📰 low_news_count"
+    if s.startswith("stale_news"):        return "📅 stale_news"
+    if s == "no_sentiment_row":           return "📭 no_sentiment_row"
+    if s.startswith("blocked_margin"):    return "🚧 blocked_margin"
+    if s.startswith("blocked_hold_veto"): return "🚧 blocked_hold_veto"
+    if s == "below_threshold":            return "🔻 below_threshold"
+    return s
+
+
+def tab_decisions() -> None:
+    """A5.2: Per-coin per-day kararlar tabi — A4'te broker_decisions tablosu."""
+    df = load_decisions(days=30)
+    if df.empty:
+        st.info("Henüz karar kaydı yok. `daily_run.py` calistirildiginda dolar.")
+        return
+
+    df = df.copy()
+    df["category"] = df["reason"].apply(_categorize_reason)
+    latest_date = df["date"].max()
+    today_df = df[df["date"] == latest_date].copy().sort_values("coin")
+
+    # === Bugün metrik kartları ===
+    st.subheader(f"Bugün ({latest_date}) — gate kırılımı")
+    cat_counts = today_df["category"].value_counts()
+    if len(cat_counts) > 0:
+        cols = st.columns(min(5, len(cat_counts)))
+        for i, (cat, n) in enumerate(cat_counts.head(5).items()):
+            cols[i].metric(cat, int(n))
+
+    # === Bugünkü kararlar tablosu ===
+    st.subheader("Bugünkü kararlar")
+    show = today_df[["coin", "raw_signal", "final_action", "reason",
+                     "model_version"]].copy()
+    show.columns = ["Coin", "Ham Sinyal", "Final Aksiyon", "Reason", "Model"]
+
+    def _color_action(row):
+        a = row["Final Aksiyon"]
+        c = SIGNAL_COLOR.get(a, "#6b7280")
+        return [f"background-color: {c}1a"] * len(row)
+
+    st.dataframe(show.style.apply(_color_action, axis=1),
+                 use_container_width=True, hide_index=True)
+
+    # === 30 gün gate dağılımı bar chart ===
+    st.subheader("Son 30 gün — günlük gate dağılımı")
+    piv = (df.groupby(["date", "category"]).size()
+             .unstack(fill_value=0)
+             .reset_index()
+             .sort_values("date"))
+    st.bar_chart(piv.set_index("date"), use_container_width=True)
+
+    # === Filtreli detaylı geçmiş ===
+    st.subheader("Detaylı geçmiş")
+    c1, c2 = st.columns([1, 3])
+    days_sel = c1.selectbox("Pencere", [7, 14, 30, 90], index=2,
+                            format_func=lambda x: f"{x} gün")
+    coin_filter = c2.multiselect("Coin filtresi",
+                                  sorted(df["coin"].unique()), default=[])
+
+    cutoff = (pd.Timestamp.utcnow().tz_localize(None).normalize()
+              - pd.Timedelta(days=days_sel)).date().isoformat()
+    df_filt = df[df["date"] >= cutoff].copy()
+    if coin_filter:
+        df_filt = df_filt[df_filt["coin"].isin(coin_filter)]
+    df_filt = df_filt.sort_values(["date", "coin"], ascending=[False, True])
+
+    show2 = df_filt[["date", "coin", "raw_signal", "final_action",
+                     "reason", "model_version"]].copy()
+    show2.columns = ["Tarih", "Coin", "Ham Sinyal", "Final", "Reason", "Model"]
+    st.dataframe(show2, use_container_width=True, hide_index=True)
+
+    # Özet
+    n_blocked = (df_filt["final_action"] != df_filt["raw_signal"]).sum()
+    st.caption(
+        f"Toplam {len(df_filt)} karar · {df_filt['coin'].nunique()} coin · "
+        f"**{n_blocked}** sinyal gate'lerce engellendi."
+    )
+
+
+# ============================================================
 # Main
 # ============================================================
 
 def main() -> None:
     header()
-    tab1, tab2, tab3 = st.tabs(["📊 Bugünkü sinyaller",
-                                "💼 Portföy",
-                                "📜 Geçmiş"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Bugünkü sinyaller",
+                                       "💼 Portföy",
+                                       "📜 Geçmiş",
+                                       "📋 Kararlar"])
     with tab1:
         tab_signals()
     with tab2:
         tab_portfolio()
     with tab3:
         tab_history()
+    with tab4:
+        tab_decisions()
 
     with st.sidebar:
         st.markdown("### Ayarlar")
