@@ -61,9 +61,15 @@ def _log(msg: str, log_file: Optional[Path] = None) -> None:
 
 
 def _sync_caches_to_db(db: DB) -> dict:
-    """Parquet cache'lerini DB'ye mirror et (son 60 gün)."""
+    """Parquet cache'lerini DB'ye mirror et (son 60 gün).
+
+    Not: pd.Timestamp.utcnow() pandas 2.x'te tz-aware UTC dondurur. Parquet
+    dosyalarindaki 'date' kolonu tz-naive olabilir, kiyaslamada hata olmasin
+    diye cutoff'u tz_localize(None) ile naive yapariz.
+    """
     counts = {"ohlcv": 0, "tech": 0, "sent": 0, "macro": 0}
-    cutoff = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=60)
+    cutoff = (pd.Timestamp.utcnow().tz_localize(None).normalize()
+              - pd.Timedelta(days=60))
 
     # OHLCV
     ohlcv_dir = DATA_LIVE / "ohlcv"
