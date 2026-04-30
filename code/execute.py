@@ -19,9 +19,8 @@ import pandas as pd
 from paths import TECH_DIR, DATA_LIVE, COINS
 from broker import BrokerAdapter, Trade
 from paper_broker import PaperBroker
-
-
-MIN_CONFIDENCE = 0.0  # p_buy/p_sell için minimum; 0 → filtre yok
+# A3: tek kaynak config.py
+from config import MIN_CONFIDENCE
 
 
 # ============================================================

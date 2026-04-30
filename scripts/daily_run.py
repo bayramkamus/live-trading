@@ -45,6 +45,7 @@ if str(CODE) not in sys.path:
 
 from paths import LOGS_DIR, COINS, DATA_LIVE, TECH_DIR, SENT_DIR, MACRO_DIR  # noqa: E402
 from db import DB                                                              # noqa: E402
+import config as cfg                                                           # noqa: E402
 
 
 def _log(msg: str, log_file: Optional[Path] = None) -> None:
@@ -158,7 +159,7 @@ def run(as_of_date: Optional[str] = None,
         skip_update: bool = False,
         execute: bool = True,
         dry_run: bool = False,
-        fill_offset: int = 1) -> int:
+        fill_offset: int = cfg.FILL_OFFSET) -> int:
     """0 dönerse başarılı, >0 ise hatalı çıkış kodu.
 
     fill_offset: T+1 fill için varsayılan 1.
@@ -200,7 +201,7 @@ def run(as_of_date: Optional[str] = None,
         df = orchestrate.run(as_of_date=as_of_date,   # None → orchestrate çözer
                              skip_update=True,
                              execute=execute,
-                             min_confidence=float(os.environ.get("MIN_CONFIDENCE", "0")),
+                             min_confidence=cfg.MIN_CONFIDENCE,
                              fill_offset=fill_offset)
         if not df.empty and "signal_date" in df.columns:
             signal_date = str(df["signal_date"].iloc[0])
@@ -249,7 +250,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=None,
                     help="signal as_of_date YYYY-MM-DD (default: orchestrate auto)")
-    ap.add_argument("--fill-offset", type=int, default=1,
+    ap.add_argument("--fill-offset", type=int, default=cfg.FILL_OFFSET,
                     help="fill_date = as_of_date + N gun (default 1=T+1; 0=same-day)")
     ap.add_argument("--skip-update", action="store_true",
                     help="Veri fetcher'lari atla")

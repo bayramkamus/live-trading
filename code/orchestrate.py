@@ -34,10 +34,8 @@ import macro_fetcher
 import sentiment_pipeline
 import inference
 from feature_builders import load_sentiment_features
-
-# A2: haber kapsam gating — A3'te config.py'a tasinacak
-NEWS_MIN_LAST7D     = 3   # 7 gun toplam haber sayisi minimum
-NEWS_STALE_DAYS_MAX = 2   # son haberden bu yana max gun
+# A3: tek kaynak config.py
+from config import NEWS_MIN_LAST7D, NEWS_STALE_DAYS_MAX, FILL_OFFSET
 
 
 def _latest_complete_day_utc() -> pd.Timestamp:
@@ -80,7 +78,7 @@ def _gate_news_coverage(coin: str, as_of_date: pd.Timestamp) -> str | None:
 
 def run(as_of_date: str | None = None, skip_update: bool = False,
         execute: bool = False, min_confidence: float = 0.0,
-        fill_offset: int = 1) -> pd.DataFrame:
+        fill_offset: int = FILL_OFFSET) -> pd.DataFrame:
     """Sinyal uret + (ops.) execute.
 
     as_of_date:  sinyalin kullandigi feature gunu (T)
@@ -178,7 +176,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default=None,
                     help="signal as_of_date YYYY-MM-DD (default: orchestrate auto)")
-    ap.add_argument("--fill-offset", type=int, default=1,
+    ap.add_argument("--fill-offset", type=int, default=FILL_OFFSET,
                     help="fill_date = as_of_date + N gun (default 1=T+1; 0=same-day)")
     ap.add_argument("--skip-update", action="store_true",
                     help="Veri fetcher'lari atla")

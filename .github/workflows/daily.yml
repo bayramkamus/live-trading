@@ -64,9 +64,25 @@ jobs:
           FRED_API_KEY:       ${{ secrets.FRED_API_KEY }}
           NEWSAPI_KEY:        ${{ secrets.NEWSAPI_KEY }}
           CRYPTOCOMPARE_KEY:  ${{ secrets.CRYPTOCOMPARE_KEY }}
-          PAPER_BASE_EQUITY: ${{ vars.PAPER_BASE_EQUITY || '10000' }}
-          PAPER_RISK_PCT:    ${{ vars.PAPER_RISK_PCT    || '0.10' }}
-          MIN_CONFIDENCE:    ${{ vars.MIN_CONFIDENCE    || '0'    }}
+          # A3: config.py defaultlari (env yoksa onlar gecerli)
+          # Paper broker
+          PAPER_BASE_EQUITY:   ${{ vars.PAPER_BASE_EQUITY   || '10000' }}
+          PAPER_RISK_PCT:      ${{ vars.PAPER_RISK_PCT      || '0.10'  }}
+          MAX_POSITIONS:       ${{ vars.MAX_POSITIONS       || '5'     }}
+          FEE_BPS:             ${{ vars.FEE_BPS             || '10'    }}
+          ALLOW_SHORTS:        ${{ vars.ALLOW_SHORTS        || 'true'  }}
+          # Sinyal kapilari (A2)
+          MIN_CONFIDENCE:      ${{ vars.MIN_CONFIDENCE      || '0'     }}
+          DIR_MARGIN_DEFAULT:  ${{ vars.DIR_MARGIN_DEFAULT  || '0.03'  }}
+          HOLD_VETO_DEFAULT:   ${{ vars.HOLD_VETO_DEFAULT   || '0.05'  }}
+          DIR_MARGIN_WEAK:     ${{ vars.DIR_MARGIN_WEAK     || '0.06'  }}
+          HOLD_VETO_WEAK:      ${{ vars.HOLD_VETO_WEAK      || '0.0'   }}
+          WEAK_COINS:          ${{ vars.WEAK_COINS          || 'ADA,AVAX,DOT,ETH,LINK,LTC' }}
+          # Haber kapsami (A2)
+          NEWS_MIN_LAST7D:     ${{ vars.NEWS_MIN_LAST7D     || '3' }}
+          NEWS_STALE_DAYS_MAX: ${{ vars.NEWS_STALE_DAYS_MAX || '2' }}
+          # Sinyal/fill timing (A1)
+          FILL_OFFSET:         ${{ vars.FILL_OFFSET         || '1'     }}
           DATE_ARG:          ${{ github.event.inputs.date }}
           SKIP_UPDATE:       ${{ github.event.inputs.skip_update }}
           EXECUTE:           ${{ github.event.inputs.execute }}

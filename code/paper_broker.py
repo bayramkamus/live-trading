@@ -46,11 +46,14 @@ STATE_FILE  = BROKER_DIR / "state.json"
 TRADES_FILE = BROKER_DIR / "trades.csv"
 EQUITY_FILE = BROKER_DIR / "equity.csv"
 
-BASE_EQUITY        = 10_000.0
-FEE_BPS            = 10.0          # 0.10%
-RISK_PCT_PER_TRADE = 0.10          # equity'nin %10'u
-MAX_POSITIONS      = 5
-ALLOW_SHORTS       = True          # SELL → SHORT aç, BUY → cover (realize)
+# Tek kaynak: config.py (env-aware). A3 tek-config refactor.
+from config import (
+    BASE_EQUITY,
+    FEE_BPS,
+    RISK_PCT_PER_TRADE,
+    MAX_POSITIONS,
+    ALLOW_SHORTS,
+)
 
 TRADE_HEADER  = ["date", "coin", "side", "qty", "price", "fee",
                  "gross", "realized_pnl", "note"]

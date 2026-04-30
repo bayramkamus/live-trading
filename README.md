@@ -78,13 +78,41 @@ Sistem **3 katmanlı** çalışır:
 | `HF_USER` | HuggingFace kullanıcı adı (ör: `bayramk`) |
 | `HF_SPACE` | Space adı (ör: `v4-crypto-signals`) |
 
-Opsiyonel (tuning için):
+Opsiyonel (tuning için — tüm sabitler `live_trading/code/config.py` içinde, env yoksa default'lar geçerli):
+
+**Paper broker**
 
 | Variable | Default | Açıklama |
 |---|---|---|
-| `PAPER_BASE_EQUITY` | 10000 | Paper broker başlangıç sermayesi ($) |
-| `PAPER_RISK_PCT` | 0.02 | İşlem başına risk oranı (2%) |
-| `MIN_CONFIDENCE` | 0.55 | BUY/SELL için min p değeri |
+| `PAPER_BASE_EQUITY` | `10000` | Başlangıç sermayesi ($) |
+| `PAPER_RISK_PCT` | `0.10` | İşlem başına equity yüzdesi (10%) |
+| `MAX_POSITIONS` | `5` | Aynı anda max açık pozisyon |
+| `FEE_BPS` | `10` | Komisyon (bps, 0.10%) |
+| `ALLOW_SHORTS` | `true` | SELL → SHORT_OPEN, BUY → cover |
+
+**Sinyal kapıları (A2)**
+
+| Variable | Default | Açıklama |
+|---|---|---|
+| `MIN_CONFIDENCE` | `0.0` | A2 üstüne ek p_buy/p_sell filtre (0=kapalı) |
+| `DIR_MARGIN_DEFAULT` | `0.03` | Strong tier: \|p_dir − p_other_dir\| min |
+| `HOLD_VETO_DEFAULT` | `0.05` | Strong tier: max(p_hold − p_dir) |
+| `DIR_MARGIN_WEAK` | `0.06` | Weak tier sıkı margin |
+| `HOLD_VETO_WEAK` | `0.0` | Weak tier sıkı HOLD veto |
+| `WEAK_COINS` | `ADA,AVAX,DOT,ETH,LINK,LTC` | f1_val<0.25 veya best_iter≤1 |
+
+**Haber kapsam (A2)**
+
+| Variable | Default | Açıklama |
+|---|---|---|
+| `NEWS_MIN_LAST7D` | `3` | 7-gün toplam haber sayısı min |
+| `NEWS_STALE_DAYS_MAX` | `2` | Son haberden bu yana max gün |
+
+**Sinyal/fill timing (A1)**
+
+| Variable | Default | Açıklama |
+|---|---|---|
+| `FILL_OFFSET` | `1` | T+1 fill (cron T'de: signal=T-2, fill=T-1) |
 
 ### Kurulum (ilk defa)
 

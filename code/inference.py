@@ -96,13 +96,14 @@ def build_feature_row(coin: str, as_of_date) -> tuple[pd.Series, dict]:
 
 # ---------- predict ----------
 
-# Default kapı parametreleri (A3'te config.py'a taşınacak).
-DIR_MARGIN_DEFAULT = 0.03   # min(p_dir - p_other_dir)
-HOLD_VETO_DEFAULT  = 0.05   # max(p_hold - p_dir)
-# Weak set (production training f1<0.25 veya best_iter<=1) icin siki kapilar
-WEAK_COINS         = {"ADA", "AVAX", "DOT", "ETH", "LINK", "LTC"}
-DIR_MARGIN_WEAK    = 0.06
-HOLD_VETO_WEAK     = 0.00
+# A3: tek kaynak config.py
+from config import (
+    DIR_MARGIN_DEFAULT,
+    HOLD_VETO_DEFAULT,
+    DIR_MARGIN_WEAK,
+    HOLD_VETO_WEAK,
+    WEAK_COINS,
+)
 
 
 def _signal_from_probs(p_sell: float, p_hold: float, p_buy: float,
