@@ -118,6 +118,18 @@ CREATE TABLE IF NOT EXISTS sent_cache (
 );
 CREATE INDEX IF NOT EXISTS idx_sent_date ON sent_cache(date);
 
+CREATE TABLE IF NOT EXISTS broker_decisions (
+    date          TEXT NOT NULL,
+    coin          TEXT NOT NULL,
+    raw_signal    TEXT,        -- model'in ham sinyali (BUY/HOLD/SELL)
+    final_action  TEXT,        -- gate'ler sonrasi (BUY/HOLD/SELL)
+    reason        TEXT,        -- 'ok'|'blocked_*'|'missing_features:*'|'low_news_count*'|...
+    raw_signal_int INTEGER,    -- ham sinyalin -1/0/+1 hali
+    model_version TEXT,        -- artifact_hash (12 hex)
+    PRIMARY KEY (date, coin)
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_date ON broker_decisions(date);
+
 CREATE TABLE IF NOT EXISTS macro_cache (
     date     TEXT PRIMARY KEY,
     payload  TEXT NOT NULL    -- JSON: 27 kolon
@@ -160,6 +172,27 @@ class DB:
             s = stmt.strip()
             if s:
                 self.conn.executescript(s + ";")
+        # A4: idempotent migration - signals tablosuna yeni kolonlar
+        self._migrate_signals_columns()
+
+    def _migrate_signals_columns(self) -> None:
+        """Mevcut signals tablosuna eksik kolonlari ekle (A4)."""
+        cur = self.conn.execute("PRAGMA table_info(signals)")
+        existing = {row["name"] for row in cur.fetchall()}
+        new_cols = [
+            ("reason",            "TEXT"),
+            ("model_version",     "TEXT"),
+            ("model_created_at",  "TEXT"),
+            ("feature_set",       "TEXT"),
+            ("gate_dir_margin",   "REAL"),
+            ("gate_hold_veto",    "REAL"),
+            ("coin_tier",         "TEXT"),
+            ("signal_date",       "TEXT"),
+            ("fill_date",         "TEXT"),
+        ]
+        for name, typ in new_cols:
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE signals ADD COLUMN {name} {typ}")
 
     # ------------- meta --------------
     def get_meta(self, k: str, default: Optional[str] = None) -> Optional[str]:
@@ -175,12 +208,15 @@ class DB:
 
     # ------------- signals --------------
     def write_signals(self, df: pd.DataFrame, as_of_date: str) -> int:
-        """signals_df'in rows'larını upsert et. Kolonlar inference çıktısı ile aynı."""
+        """signals upsert. A4: reason, model_version, gate_*, signal/fill_date eklendi."""
         if df.empty:
             return 0
-        cols = ["coin", "signal", "signal_int", "p_sell", "p_hold", "p_buy",
-                "buy_th", "sell_th", "horizon", "n_features",
-                "has_sent", "has_macro", "has_tech"]
+        cols = ["coin","signal","signal_int","p_sell","p_hold","p_buy",
+                "buy_th","sell_th","horizon","n_features",
+                "has_sent","has_macro","has_tech",
+                "reason","model_version","model_created_at","feature_set",
+                "gate_dir_margin","gate_hold_veto","coin_tier",
+                "signal_date","fill_date"]
         for c in cols:
             if c not in df.columns:
                 df[c] = None
@@ -194,20 +230,61 @@ class DB:
                 _f(r.get("buy_th")), _f(r.get("sell_th")),
                 _i(r.get("horizon")), _i(r.get("n_features")),
                 _i(r.get("has_sent")), _i(r.get("has_macro")), _i(r.get("has_tech")),
+                str(r["reason"])           if pd.notna(r.get("reason"))           else None,
+                str(r["model_version"])    if pd.notna(r.get("model_version"))    else None,
+                str(r["model_created_at"]) if pd.notna(r.get("model_created_at")) else None,
+                str(r["feature_set"])      if pd.notna(r.get("feature_set"))      else None,
+                _f(r.get("gate_dir_margin")), _f(r.get("gate_hold_veto")),
+                str(r["coin_tier"])        if pd.notna(r.get("coin_tier"))        else None,
+                str(r["signal_date"])      if pd.notna(r.get("signal_date"))      else None,
+                str(r["fill_date"])        if pd.notna(r.get("fill_date"))        else None,
             ))
         self.conn.executemany(
-            "INSERT INTO signals(date,coin,signal,signal_int,p_sell,p_hold,p_buy,"
-            "buy_th,sell_th,horizon,n_features,has_sent,has_macro,has_tech) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "INSERT INTO signals("
+            "date,coin,signal,signal_int,p_sell,p_hold,p_buy,buy_th,sell_th,"
+            "horizon,n_features,has_sent,has_macro,has_tech,"
+            "reason,model_version,model_created_at,feature_set,"
+            "gate_dir_margin,gate_hold_veto,coin_tier,signal_date,fill_date"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(date,coin) DO UPDATE SET "
             "signal=excluded.signal,signal_int=excluded.signal_int,"
             "p_sell=excluded.p_sell,p_hold=excluded.p_hold,p_buy=excluded.p_buy,"
             "buy_th=excluded.buy_th,sell_th=excluded.sell_th,"
             "horizon=excluded.horizon,n_features=excluded.n_features,"
-            "has_sent=excluded.has_sent,has_macro=excluded.has_macro,has_tech=excluded.has_tech",
+            "has_sent=excluded.has_sent,has_macro=excluded.has_macro,has_tech=excluded.has_tech,"
+            "reason=excluded.reason,model_version=excluded.model_version,"
+            "model_created_at=excluded.model_created_at,feature_set=excluded.feature_set,"
+            "gate_dir_margin=excluded.gate_dir_margin,gate_hold_veto=excluded.gate_hold_veto,"
+            "coin_tier=excluded.coin_tier,"
+            "signal_date=excluded.signal_date,fill_date=excluded.fill_date",
             rows,
         )
         return len(rows)
+
+    def write_decision(self, date: str, coin: str,
+                       raw_signal: str, final_action: str, reason: str,
+                       raw_signal_int: int = 0,
+                       model_version: Optional[str] = None) -> None:
+        """A4: orchestrate per-coin decision'i broker_decisions tablosuna upsert."""
+        self.conn.execute(
+            "INSERT INTO broker_decisions("
+            "date,coin,raw_signal,final_action,reason,raw_signal_int,model_version"
+            ") VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(date,coin) DO UPDATE SET "
+            "raw_signal=excluded.raw_signal,final_action=excluded.final_action,"
+            "reason=excluded.reason,raw_signal_int=excluded.raw_signal_int,"
+            "model_version=excluded.model_version",
+            (date, coin, raw_signal, final_action, reason, int(raw_signal_int),
+             model_version),
+        )
+
+    def read_decisions(self, days: int = 30) -> pd.DataFrame:
+        cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat()
+        return pd.read_sql_query(
+            "SELECT * FROM broker_decisions WHERE date>=? "
+            "ORDER BY date DESC, coin ASC",
+            self.conn, params=(cutoff,),
+        )
 
     def read_signals(self, days: int = 30) -> pd.DataFrame:
         cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat()

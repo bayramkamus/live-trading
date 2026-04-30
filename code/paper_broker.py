@@ -88,7 +88,8 @@ class PaperBroker(BrokerAdapter):
     # ---------- state / files ----------
 
     def _ensure_files(self) -> None:
-        BROKER_DIR.mkdir(parents=True, exist_ok=True)
+        # A4: replay'de state_file replay dir'inde -> parent'i kullan
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.trades_file.exists():
             with self.trades_file.open("w", newline="") as f:
                 csv.writer(f).writerow(TRADE_HEADER)
@@ -105,11 +106,33 @@ class PaperBroker(BrokerAdapter):
             positions = {c: Position.from_dict(d)
                          for c, d in js.get("positions", {}).items()}
             pb = cls(cash=cash, positions=positions, state_file=state_file)
+            # Replay durumunda alt dizin trade/equity dosyalarini da iza et
+            pb.trades_file = state_file.parent / "trades.csv"
+            pb.equity_file = state_file.parent / "equity.csv"
+            pb._ensure_files()
             return pb
-        return cls(cash=base_equity, positions={}, state_file=state_file)
+        # Yeni hesap: state_file'in parent klasorunde tum dosyalar olsun
+        pb = cls(cash=base_equity, positions={}, state_file=state_file,
+                 trades_file=state_file.parent / "trades.csv",
+                 equity_file=state_file.parent / "equity.csv")
+        return pb
+
+    @classmethod
+    def for_replay(cls, replay_date: str,
+                   base_equity: float = BASE_EQUITY) -> "PaperBroker":
+        """A4: Gecmis bir signal_date icin ayri replay hesabi.
+
+        State dizini: data_live/broker_replay/<signal_date>/
+        Main paper account'u (data_live/broker/) bozmaz; her replay run kendi
+        izole klasorunde calisir.
+        """
+        replay_dir = DATA_LIVE / "broker_replay" / replay_date
+        replay_dir.mkdir(parents=True, exist_ok=True)
+        return cls.load_or_init(state_file=replay_dir / "state.json",
+                                base_equity=base_equity)
 
     def save(self) -> None:
-        BROKER_DIR.mkdir(parents=True, exist_ok=True)
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
         state = {
             "cash": self.cash,
             "positions": {c: p.to_dict() for c, p in self.positions.items()},

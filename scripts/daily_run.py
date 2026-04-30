@@ -209,15 +209,33 @@ def run(as_of_date: Optional[str] = None,
         _log(f"[inference] HATA: {e}\n{traceback.format_exc()}", log_file)
         errors.append({"step": "inference", "error": str(e)})
 
-    # 3) DB'ye yansıt
-    if not dry_run:
+    # A4: replay tespit - gecmis tarih run'lari main DB'yi etkilemesin
+    today_utc = pd.Timestamp.utcnow().tz_localize(None).normalize().date().isoformat()
+    is_replay = bool(signal_date) and signal_date < today_utc and signal_date != today_utc
+
+    # 3) DB'ye yansit
+    if not dry_run and not is_replay:
         try:
             with DB() as db:
                 db.init()
-                # signals — gerçek signal_date kullan (T-2 olabilir)
+                # signals + decisions
                 if not df.empty:
                     n = db.write_signals(df, as_of_date=signal_date)
                     _log(f"[db] signals upsert: {n}  signal_date={signal_date}", log_file)
+                    # A4: per-coin broker_decisions
+                    n_dec = 0
+                    for _, r in df.iterrows():
+                        db.write_decision(
+                            date=signal_date,
+                            coin=str(r["coin"]),
+                            raw_signal=str(r.get("raw_signal", r.get("signal", "HOLD"))),
+                            raw_signal_int=int(r.get("raw_signal_int", r.get("signal_int", 0)) or 0),
+                            final_action=str(r.get("signal", "HOLD")),
+                            reason=str(r.get("reason", "ok")),
+                            model_version=str(r["model_version"]) if pd.notna(r.get("model_version")) else None,
+                        )
+                        n_dec += 1
+                    _log(f"[db] broker_decisions upsert: {n_dec}", log_file)
                 # cache mirror
                 counts = _sync_caches_to_db(db)
                 _log(f"[db] cache mirror: {counts}", log_file)
@@ -231,9 +249,20 @@ def run(as_of_date: Optional[str] = None,
                 # meta
                 db.set_meta("last_run", datetime.utcnow().isoformat(timespec="seconds"))
                 db.set_meta("last_date", signal_date)
+                # A4: aktif model versiyonu
+                try:
+                    sys.path.insert(0, str(CODE))
+                    from model_version import get_global_version
+                    gv = get_global_version()
+                    db.set_meta("last_model_version", gv.get("global_hash") or "")
+                    db.set_meta("last_model_created_at", gv.get("created_at") or "")
+                except Exception:
+                    pass
         except Exception as e:
             _log(f"[db] HATA: {e}\n{traceback.format_exc()}", log_file)
             errors.append({"step": "db", "error": str(e)})
+    elif is_replay:
+        _log(f"[db] REPLAY mode (signal_date={signal_date} < {today_utc}) — main DB yazilmadi", log_file)
 
     # 4) özet
     if errors:

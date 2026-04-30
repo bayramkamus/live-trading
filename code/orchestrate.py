@@ -36,6 +36,8 @@ import inference
 from feature_builders import load_sentiment_features
 # A3: tek kaynak config.py
 from config import NEWS_MIN_LAST7D, NEWS_STALE_DAYS_MAX, FILL_OFFSET
+# A4: model versiyon
+from model_version import get_model_version, get_global_version
 
 
 def _latest_complete_day_utc() -> pd.Timestamp:
@@ -104,6 +106,11 @@ def run(as_of_date: str | None = None, skip_update: bool = False,
         print("-> Sentiment guncelle...")
         sentiment_pipeline.update_all()
 
+    # A4: model versiyon meta (tum coinler icin global hash + per-coin hash)
+    glob_ver = get_global_version()
+    print(f"[orchestrate] model_version global={glob_ver.get('global_hash')}  "
+          f"created={glob_ver.get('created_at')}")
+
     print(f"-> Sinyaller uretiliyor (as_of={target.date()})...")
     rows = []
     errors = []
@@ -111,22 +118,31 @@ def run(as_of_date: str | None = None, skip_update: bool = False,
     for coin in COINS:
         try:
             out = inference.predict_signal_for_date(coin, target)
+            raw_signal = out.get("signal", "HOLD")
+            raw_signal_int = int(out.get("signal_int", 0))
             # 1) missing-feature gate (A1)
             out, reason = _gate_missing_features(out)
-            # 2) news-coverage gate (A2) — sadece sinyal aktif iken kontrol et
+            # 2) news-coverage gate (A2) — sadece sinyal aktif iken
             if reason is None and out.get("signal_int", 0) != 0:
                 news_block = _gate_news_coverage(coin, target)
                 if news_block:
                     out["signal"] = "HOLD"
                     out["signal_int"] = 0
                     reason = news_block
-            # 3) gate_reason (3-kapi sonucu) zaten predict'ten geldi; HOLD ise
-            #    gate_reason='blocked_*' veya 'below_threshold'
+            # 3) gate_reason (3-kapi)
             if reason is None and out.get("signal_int", 0) == 0:
                 gr = out.get("gate_reason", "below_threshold")
                 if gr.startswith("blocked_"):
                     reason = gr
             out["reason"] = reason or "ok"
+            # A4: model_version meta her satira yazilir
+            mv = get_model_version(coin)
+            out["model_version"]    = mv.get("artifact_hash")
+            out["model_created_at"] = mv.get("created_at")
+            out["feature_set"]      = mv.get("feature_set")
+            # A4: ham sinyal de saklansin (gate'lerden once)
+            out["raw_signal"]     = raw_signal
+            out["raw_signal_int"] = raw_signal_int
             if reason:
                 n_gated += 1
                 print(f"  [{coin}] {reason} -> HOLD")
@@ -160,8 +176,16 @@ def run(as_of_date: str | None = None, skip_update: bool = False,
         try:
             from execute import execute_signals
             from paper_broker import PaperBroker
-            broker = PaperBroker.load_or_init()
-            print(f"\n-> PaperBroker execute (fill_date={fill_date.date()})...")
+            # A4: replay tespit - signal_date bugun degilse main hesabi koru
+            today_utc = pd.Timestamp.utcnow().tz_localize(None).normalize()
+            is_replay = target < today_utc - pd.Timedelta(days=1)
+            if is_replay:
+                broker = PaperBroker.for_replay(target.date().isoformat())
+                print(f"\n-> PaperBroker REPLAY (signal_date={target.date()} < now), "
+                      f"izole dizin={broker.state_file.parent}")
+            else:
+                broker = PaperBroker.load_or_init()
+                print(f"\n-> PaperBroker MAIN execute (fill_date={fill_date.date()})...")
             execute_signals(df, as_of_date=target.date().isoformat(),
                             fill_date=fill_date.date().isoformat(),
                             broker=broker, min_confidence=min_confidence,
