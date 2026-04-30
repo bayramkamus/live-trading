@@ -209,9 +209,11 @@ def run(as_of_date: Optional[str] = None,
         _log(f"[inference] HATA: {e}\n{traceback.format_exc()}", log_file)
         errors.append({"step": "inference", "error": str(e)})
 
-    # A4: replay tespit - gecmis tarih run'lari main DB'yi etkilemesin
+    # A4: replay = kullanici --date <past> ile MANUEL gecmis tarih verdi
+    # Default cron run'inda as_of_date None'dur (orchestrate kendi cozer T-2'ye);
+    # bu durum replay sayilmaz, main DB'ye yazilir.
     today_utc = pd.Timestamp.utcnow().tz_localize(None).normalize().date().isoformat()
-    is_replay = bool(signal_date) and signal_date < today_utc and signal_date != today_utc
+    is_replay = bool(as_of_date) and as_of_date < today_utc
 
     # 3) DB'ye yansit
     if not dry_run and not is_replay:
