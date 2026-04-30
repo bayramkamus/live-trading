@@ -203,9 +203,19 @@ def tab_portfolio() -> None:
         st.caption("Açık pozisyon yok.")
     else:
         p = pos.copy()
-        p["mark"] = p["coin"].map(marks).fillna(p["avg_price"])
-        p["mkt_value"] = p["qty"] * p["mark"]
-        p["unreal_pnl"] = (p["mark"] - p["avg_price"]) * p["qty"]
+        # A5.1: marks dict'te olmayan coin icin entry'ye sessiz fallback YAPMA.
+        # NaN birak; tabloda "—" olarak gozukur, unreal PnL hesaplanmaz.
+        p["mark"] = p["coin"].map(marks)
+        missing_marks = sorted(p.loc[p["mark"].isna(), "coin"].tolist())
+        if missing_marks:
+            st.warning(
+                f"⚠️ {len(missing_marks)} coin için son fiyat (mark) alınamadı; "
+                f"unrealized PnL hesaplanamadı: **{', '.join(missing_marks)}**. "
+                f"Daha güncel veri için bir sonraki daily-signals run'ını bekleyin."
+            )
+
+        p["mkt_value"]      = p["qty"] * p["mark"]
+        p["unreal_pnl"]     = (p["mark"] - p["avg_price"]) * p["qty"]
         p["unreal_pnl_pct"] = 100 * (p["mark"] / p["avg_price"] - 1)
         # Duration: bugünden opened_at'e kaç gün (her ikisini tz-naive yap)
         opened = pd.to_datetime(p["opened_at"], errors="coerce", utc=True)
@@ -231,6 +241,8 @@ def tab_portfolio() -> None:
         def _color_unreal(row):
             try:
                 v = float(raw_unreal[row.name])
+                if pd.isna(v):
+                    return ["background-color: transparent"] * len(row)
             except Exception:
                 v = 0.0
             color = "#16a34a22" if v > 0 else ("#dc262622" if v < 0 else "transparent")
