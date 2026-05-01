@@ -208,7 +208,8 @@ def run(as_of_date: Optional[str] = None,
                              skip_update=True,
                              execute=execute,
                              min_confidence=cfg.MIN_CONFIDENCE,
-                             fill_offset=fill_offset)
+                             fill_offset=fill_offset,
+                             replay=False)
         if not df.empty and "signal_date" in df.columns:
             signal_date = str(df["signal_date"].iloc[0])
     except Exception as e:

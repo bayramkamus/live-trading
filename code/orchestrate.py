@@ -82,7 +82,8 @@ def _gate_news_coverage(coin: str, as_of_date: pd.Timestamp) -> str | None:
 
 def run(as_of_date: str | None = None, skip_update: bool = False,
         execute: bool = False, min_confidence: float = 0.0,
-        fill_offset: int = FILL_OFFSET) -> pd.DataFrame:
+        fill_offset: int = FILL_OFFSET,
+        replay: bool = False) -> pd.DataFrame:
     """Sinyal uret + (ops.) execute.
 
     as_of_date:  sinyalin kullandigi feature gunu (T)
@@ -179,12 +180,12 @@ def run(as_of_date: str | None = None, skip_update: bool = False,
             from execute import execute_signals
             from paper_broker import PaperBroker
             # A4: replay tespit - signal_date bugun degilse main hesabi koru
-            today_utc = pd.Timestamp.utcnow().tz_localize(None).normalize()
-            is_replay = target < today_utc - pd.Timedelta(days=1)
-            if is_replay:
+           
+            
+            if replay:
                 broker = PaperBroker.for_replay(target.date().isoformat())
-                print(f"\n-> PaperBroker REPLAY (signal_date={target.date()} < now), "
-                      f"izole dizin={broker.state_file.parent}")
+                print(f"\n-> PaperBroker REPLAY (signal_date={target.date()}), "
+                    f"izole dizin={broker.state_file.parent}")
             else:
                 broker = PaperBroker.load_or_init()
                 print(f"\n-> PaperBroker MAIN execute (fill_date={fill_date.date()})...")
