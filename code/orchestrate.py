@@ -67,8 +67,10 @@ def _gate_news_coverage(coin: str, as_of_date: pd.Timestamp) -> str | None:
             return "no_sentiment_row"
         r = row.iloc[0]
         # 7-gun pencere icin (sentiment_pipeline) total_news_count + days_since_news kullan
-        total_news_7d = float(r.get("total_news_count", 0) or 0)
-        days_since = float(r.get("days_since_news", 999) or 999)
+        total_raw = r.get("total_news_count", 0)
+        days_raw = r.get("days_since_news", pd.NA)
+        total_news_7d = 0.0 if pd.isna(total_raw) else float(total_raw)
+        days_since = 999.0 if pd.isna(days_raw) else float(days_raw)
         if total_news_7d < NEWS_MIN_LAST7D:
             return f"low_news_count({int(total_news_7d)}<{NEWS_MIN_LAST7D})"
         if days_since > NEWS_STALE_DAYS_MAX:
