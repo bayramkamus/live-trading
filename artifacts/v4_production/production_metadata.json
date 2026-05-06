@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-04-25T02:06:16.571582Z",
+  "created_at": "2026-05-06T12:14:31.005543Z",
   "feature_set": "all (sent+macro+tech). NLP head: jhartmann-only (winner of V4 nlp_combo_ablation on S1 \u2014 port Sharpe +1.38, return +183%, alpha vs BH +193 pp)",
   "train_end": "2025-12-31",
   "val_start": "2026-01-01",

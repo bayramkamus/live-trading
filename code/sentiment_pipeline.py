@@ -25,6 +25,12 @@ import numpy as np
 import pandas as pd
 import requests
 
+try:
+    from bs4 import BeautifulSoup
+    HAS_BS4_LIVE = True
+except ImportError:
+    HAS_BS4_LIVE = False
+
 from paths import SENT_DIR, COINS, HISTORICAL_DATA_ROOT
 
 
@@ -55,7 +61,8 @@ USE_CRYPTOCOMPARE = True   # önerilen birincil kaynak
 USE_RSS           = True   # fallback/supplement (sınırsız)
 USE_NEWSAPI       = True   # anahtar varken açık
 USE_CRYPTOPANIC   = False  # ücretsiz tier bitti — kapalı
-USE_TRADINGVIEW   = False  # POC sonucu pozitifse True yap (test_tradingview_scrape.py)
+USE_TRADINGVIEW   = True   # POC kanıtladı (5/5 başarı, GHA Linux + lokal)
+TRADINGVIEW_FETCH_BODIES = False  # True → her idea'nın detail page body'sini de çek (yavaş)
 
 # ============================================================
 # SECTION ETIKETLEMESI
@@ -464,6 +471,146 @@ def fetch_news_rss(coin: str, since: str, until: str,
     return df.drop_duplicates("url").reset_index(drop=True)
 
 
+# ---------- TradingView Ideas (community trader analizleri) ----------
+
+# TV ideas listing — bot için realistik headers. POC (test_tradingview_scrape.py)
+# GHA Linux runner'ında 5/5 başarılı, Cloudflare blok yok.
+_TV_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not A(Brand";v="24"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def fetch_news_tradingview(coin: str, since: str, until: str,
+                           fetch_bodies: bool = False,
+                           verbose: bool = False) -> pd.DataFrame:
+    """TradingView Ideas listing'i scrape et.
+
+    URL: https://www.tradingview.com/symbols/{coin}USD/ideas/
+    Parser: [class*="ideaCard-"] (POC ile doğrulandı, ~23 idea/coin döner)
+
+    fetch_bodies=True olursa her idea'nın detail sayfasını da çeker (yavaşlatır
+    ama sliding window FB+CB için zengin metin sağlar). False (default) snippet
+    yeterli kabul eder.
+
+    Hata durumlarında (CF blok, network, parser fail) boş DataFrame döner —
+    pipeline'ı kırmaz.
+    """
+    if not HAS_BS4_LIVE:
+        warnings.warn("[TV] beautifulsoup4 yok — TV scraper atlandı")
+        return pd.DataFrame()
+
+    url = f"https://www.tradingview.com/symbols/{coin}USD/ideas/"
+    try:
+        r = requests.get(url, headers=_TV_HEADERS, timeout=20, allow_redirects=True)
+    except requests.RequestException as e:
+        if verbose:
+            print(f"  [TV] {coin}: request fail {e}")
+        return pd.DataFrame()
+
+    if r.status_code != 200:
+        if verbose:
+            print(f"  [TV] {coin}: HTTP {r.status_code}")
+        return pd.DataFrame()
+
+    body_lower = r.text.lower()
+    cf_markers = ("checking your browser", "cf-browser-verification", "just a moment...")
+    if any(m in body_lower for m in cf_markers):
+        if verbose:
+            print(f"  [TV] {coin}: Cloudflare challenge — skip")
+        return pd.DataFrame()
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    cards = soup.select('[class*="ideaCard-"]')
+    if verbose:
+        print(f"  [TV] {coin}: {len(cards)} idea card parse edildi")
+
+    rows = []
+    for c in cards:
+        # Title: "title-{HASH}" class veya ilk anchor
+        title_el = c.select_one('[class*="title-"]') or c.find("a")
+        if title_el is None:
+            continue
+        title = title_el.get_text(strip=True)
+        if len(title) < 10:
+            continue
+
+        # Body snippet: "paragraph-{HASH}" veya 'p' tag'i
+        body_el = c.select_one('[class*="paragraph-"]') or c.find("p")
+        body = body_el.get_text(strip=True) if body_el else ""
+
+        # URL: ideaCard içinden href
+        url_el = c.find("a", href=True)
+        idea_url = url_el["href"] if url_el else ""
+        if idea_url and not idea_url.startswith("http"):
+            idea_url = "https://www.tradingview.com" + idea_url
+
+        # Date: TV "time" element veya datetime attribute
+        time_el = c.find("time") or c.select_one('[class*="time-"]')
+        date_str = ""
+        if time_el is not None:
+            # datetime attribute genellikle ISO format
+            dt_attr = time_el.get("datetime") or time_el.get("title") or time_el.get_text(strip=True)
+            try:
+                dt = pd.to_datetime(dt_attr, errors="coerce", utc=True)
+                if pd.notna(dt):
+                    date_str = dt.date().isoformat()
+            except Exception:
+                pass
+        # Fallback: bugünün tarihi (TV trending'i genelde son 24-48 saat)
+        if not date_str:
+            date_str = pd.Timestamp.utcnow().date().isoformat()
+
+        rows.append({
+            "date": date_str,
+            "title": title[:300],
+            "body": body[:2000],
+            "source": "tradingview_ideas",
+            "url": idea_url,
+        })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df = df[(df["date"] >= since) & (df["date"] <= until)]
+    df = df.drop_duplicates("url").reset_index(drop=True)
+
+    # Detay body fetch — opsiyonel, FB+CB sliding window için tam metin
+    if fetch_bodies and not df.empty:
+        bodies_full = []
+        for u in df["url"].tolist():
+            try:
+                rd = requests.get(u, headers=_TV_HEADERS, timeout=15)
+                if rd.status_code == 200:
+                    sd = BeautifulSoup(rd.text, "html.parser")
+                    art = sd.find("article") or sd.select_one('[class*="ideaContent-"]')
+                    full = art.get_text(" ", strip=True)[:5000] if art else ""
+                    bodies_full.append(full)
+                else:
+                    bodies_full.append("")
+                time.sleep(1.0)  # rate limit
+            except Exception:
+                bodies_full.append("")
+        # Snippet + full body birleşimi
+        df["body"] = [
+            (full if len(full) > len(snip) else snip)
+            for snip, full in zip(df["body"], bodies_full)
+        ]
+
+    return df
+
+
 # ---------- Merkezi dispatcher ----------
 
 def fetch_news(coin: str, since: str, until: str) -> pd.DataFrame:
@@ -497,12 +644,10 @@ def fetch_news(coin: str, since: str, until: str) -> pd.DataFrame:
             frames.append(cp)
 
     if USE_TRADINGVIEW:
-        try:
-            tv = fetch_news_tradingview(coin, since, until)
-            if not tv.empty:
-                frames.append(tv)
-        except NameError:
-            warnings.warn("TradingView fetcher henüz implement edilmedi — atla")
+        tv = fetch_news_tradingview(coin, since, until,
+                                    fetch_bodies=TRADINGVIEW_FETCH_BODIES)
+        if not tv.empty:
+            frames.append(tv)
 
     if not frames:
         return pd.DataFrame(columns=["date", "title", "body", "source", "url", "section"])
@@ -687,64 +832,173 @@ def _direction(score: float) -> str:
     return "neu"
 
 
-def aggregate_daily(scored: pd.DataFrame, coin: str,
-                    fill_dates: Optional[pd.DatetimeIndex] = None) -> pd.DataFrame:
-    """(date × haber) → (date) seviyesinde sentiment features.
+# ─────────────────────────────────────────────────────────────────────────
+# Section weights (V2 t3_section_weights.csv'den okunur; coin-spesifik S5)
+# ─────────────────────────────────────────────────────────────────────────
 
-    Girdi kolonları beklenir: date, combined_score (ve isteğe bağlı score_fb/cb/jh).
-    Çıktı kolonları (V2 historical şemasıyla uyumlu):
-        date, combined_score (mean), combined_pos_ratio, combined_neu_ratio, combined_neg_ratio,
-        total_news_count, has_news, days_since_news,
-        section_{1,2,3}_avg_score / pos_ratio / neu_ratio / neg_ratio / news_count  (NaN — legacy)
+SECTION_WEIGHTS_CSV = "section_weights.csv"   # data_live/ altında aranır
+
+
+def _load_section_weights_for_coin(coin: str, scenario: str = "S5") -> dict[int, float]:
+    """t3 csv'den (coin, scenario) ağırlıklarını çek. Bulunamazsa 1/3 fallback.
+
+    Production için coin-spesifik S5 (en yeni rejim) önerilir — production
+    modelinin eğitim cut-off (2025-12-31) ile S5 train/val penceresi uyumlu.
+    """
+    try:
+        from paths import HISTORICAL_DATA_ROOT
+    except ImportError:
+        HISTORICAL_DATA_ROOT = Path(".")
+
+    # Önce live (vendored) konumuna bak, sonra historical
+    candidates = [
+        SENT_DIR.parent / SECTION_WEIGHTS_CSV,                                   # data_live/section_weights.csv
+        HISTORICAL_DATA_ROOT / "models" / "v2_sentiment_strategy" / SECTION_WEIGHTS_CSV,
+    ]
+    csv_path = next((p for p in candidates if p.is_file()), None)
+    if csv_path is None:
+        warnings.warn(f"[{coin}] section_weights.csv bulunamadı, 1/3 fallback")
+        return {1: 1/3, 2: 1/3, 3: 1/3}
+
+    df = pd.read_csv(csv_path)
+    row = df[(df["coin"] == coin) & (df["scenario"] == scenario)]
+    if row.empty:
+        warnings.warn(f"[{coin}/{scenario}] section_weights.csv'de yok, 1/3 fallback")
+        return {1: 1/3, 2: 1/3, 3: 1/3}
+
+    r = row.iloc[0]
+    return {1: float(r["w_s1"]), 2: float(r["w_s2"]), 3: float(r["w_s3"])}
+
+
+def aggregate_daily(scored: pd.DataFrame, coin: str,
+                    fill_dates: Optional[pd.DatetimeIndex] = None,
+                    weights_scenario: str = "S5") -> pd.DataFrame:
+    """(date × haber) → (date) seviyesinde sentiment features (section-aware).
+
+    Girdi kolonları:
+        date, combined_score, _dir (opsiyonel — yoksa SCORE_*_THRESH'den hesaplar),
+        section (1/2/3 — `_section_for_source` ile etiketlenmiş olmalı)
+
+    Çıktı şeması (V2 historical training ile birebir uyumlu, 22 kolon):
+        date,
+        section_{1,2,3}_avg_score / pos_ratio / neu_ratio / neg_ratio / news_count   (5×3 = 15)
+        combined_score, combined_pos_ratio, combined_neu_ratio, combined_neg_ratio   (4)
+        total_news_count, has_news, days_since_news                                  (3)
+
+    section_* kolonları artık gerçek per-section agregat (NaN değil) — ancak
+    o gün ilgili section'da haber yoksa o section'ın kolonları NaN olur,
+    combined_score IC-weighted olarak mevcut section'lar üzerinden hesaplanır
+    (V2 t4_features.py'deki aynı iki-seviyeli fallback).
     """
     # Boş kaynak → sadece date index'i ile boş çerçeve
     if scored.empty or "combined_score" not in scored.columns:
-        scored = pd.DataFrame(columns=["date", "combined_score"])
+        scored = pd.DataFrame(columns=["date", "combined_score", "section"])
 
     df = scored.copy()
     df["date"] = pd.to_datetime(df["date"])
     df["_dir"] = df["combined_score"].apply(_direction)
+    # Section yoksa (eski caller veya hatalı upstream) section_2 default
+    if "section" not in df.columns:
+        df["section"] = 2
+    df["section"] = df["section"].fillna(2).astype(int)
 
-    # Groupby agregasyon
-    g = df.groupby("date")
-    daily = pd.DataFrame({
-        "combined_score":      g["combined_score"].mean(),
-        "total_news_count":    g.size(),
-        "combined_pos_ratio":  g["_dir"].apply(lambda s: (s == "pos").mean()),
-        "combined_neu_ratio":  g["_dir"].apply(lambda s: (s == "neu").mean()),
-        "combined_neg_ratio":  g["_dir"].apply(lambda s: (s == "neg").mean()),
-    }).reset_index()
+    # ── 1) Per-section günlük agregat ──────────────────────────────────
+    if df.empty:
+        per_sec = pd.DataFrame(columns=[
+            "date", "section", "avg_score",
+            "pos_ratio", "neu_ratio", "neg_ratio", "news_count"])
+    else:
+        g_sec = df.groupby(["date", "section"])
+        per_sec = pd.DataFrame({
+            "avg_score":  g_sec["combined_score"].mean(),
+            "pos_ratio":  g_sec["_dir"].apply(lambda s: (s == "pos").mean()),
+            "neu_ratio":  g_sec["_dir"].apply(lambda s: (s == "neu").mean()),
+            "neg_ratio":  g_sec["_dir"].apply(lambda s: (s == "neg").mean()),
+            "news_count": g_sec.size(),
+        }).reset_index()
 
-    # Tam tarih aralığına reindex (haber olmayan günler için has_news=0)
-    if fill_dates is None and not daily.empty:
-        fill_dates = pd.date_range(daily["date"].min(), daily["date"].max(), freq="D")
+    # ── 2) Wide pivot: section_{1,2,3}_{metric} ─────────────────────────
+    if per_sec.empty:
+        # Boş çerçeve — date axis'ı fill_dates'ten kuracağız
+        wide = pd.DataFrame()
+    else:
+        pivots = []
+        for metric in ("avg_score", "pos_ratio", "neu_ratio", "neg_ratio", "news_count"):
+            piv = per_sec.pivot(index="date", columns="section", values=metric)
+            piv.columns = [f"section_{int(s)}_{metric}" for s in piv.columns]
+            pivots.append(piv)
+        wide = pd.concat(pivots, axis=1)
+
+    # 3 section kolonunun da var olmasını garantile (eksik section → NaN/0)
+    for sec in (1, 2, 3):
+        for metric in ("avg_score", "pos_ratio", "neu_ratio", "neg_ratio"):
+            col = f"section_{sec}_{metric}"
+            if col not in wide.columns:
+                wide[col] = np.nan
+        nc_col = f"section_{sec}_news_count"
+        if nc_col not in wide.columns:
+            wide[nc_col] = 0
+
+    # ── 3) Date axis'ı fill_dates'e reindex ─────────────────────────────
+    if fill_dates is None and not wide.empty:
+        fill_dates = pd.date_range(wide.index.min(), wide.index.max(), freq="D")
     if fill_dates is not None:
-        daily = daily.set_index("date").reindex(fill_dates).rename_axis("date").reset_index()
+        wide = wide.reindex(fill_dates)
+    wide.index.name = "date"
 
-    daily["has_news"] = (daily["total_news_count"].fillna(0) > 0).astype(int)
-    daily["total_news_count"] = daily["total_news_count"].fillna(0).astype(int)
-    for c in ["combined_pos_ratio", "combined_neu_ratio", "combined_neg_ratio"]:
-        daily[c] = daily[c].fillna(0.0)
-    # Haber yoksa combined_score NaN kalır (ffill'i add_lag_rolling öncesi yapmıyoruz;
-    # böylece lag/rolling gerçek dağılımı yansıtır)
+    # news_count NaN → 0 (haber yok)
+    for sec in (1, 2, 3):
+        wide[f"section_{sec}_news_count"] = wide[f"section_{sec}_news_count"].fillna(0).astype(int)
 
-    # days_since_news — son haberli günden bu yana geçen gün sayısı
+    # ── 4) combined_score = IC-weighted section avg_score ──────────────
+    weights = _load_section_weights_for_coin(coin, scenario=weights_scenario)
+    score_arr = np.vstack([wide[f"section_{s}_avg_score"].values for s in (1, 2, 3)])  # (3, N)
+    w_arr = np.array([weights[s] for s in (1, 2, 3)]).reshape(-1, 1)                   # (3, 1)
+    mask = ~np.isnan(score_arr)
+
+    # Level 1: IC-weighted (renormalize over available sections)
+    w_matrix = np.broadcast_to(w_arr, score_arr.shape).copy()
+    w_matrix[~mask] = 0.0
+    w_sum = w_matrix.sum(axis=0)
+    score_zeroed = np.where(mask, score_arr, 0.0)
+    weighted_sum = (w_matrix * score_zeroed).sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        combined_ic = np.where(w_sum > 0, weighted_sum / w_sum, np.nan)
+
+    # Level 2 (fallback): equal-weighted over available sections
+    n_avail = mask.sum(axis=0)
+    equal_sum = score_zeroed.sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        combined_eq = np.where(n_avail > 0, equal_sum / n_avail, np.nan)
+
+    wide["combined_score"] = np.where(np.isfinite(combined_ic), combined_ic, combined_eq)
+
+    # ── 5) combined_*_ratio = news-count-weighted (V2 t4 ile aynı) ──────
+    news_arr = np.vstack([wide[f"section_{s}_news_count"].values for s in (1, 2, 3)]).astype(float)
+    total_news = news_arr.sum(axis=0)
+    for ratio in ("pos_ratio", "neu_ratio", "neg_ratio"):
+        r_arr = np.vstack([wide[f"section_{s}_{ratio}"].values for s in (1, 2, 3)])
+        r_arr = np.nan_to_num(r_arr, nan=0.0)
+        num = (r_arr * news_arr).sum(axis=0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            wide[f"combined_{ratio}"] = np.where(total_news > 0, num / total_news, 0.0)
+
+    # ── 6) total_news_count, has_news, days_since_news ─────────────────
+    wide["total_news_count"] = total_news.astype(int)
+    wide["has_news"] = (total_news > 0).astype(int)
+
     last_idx = None
     days_since = []
-    for idx, row in daily.iterrows():
-        if row["has_news"] == 1:
+    for idx, hn in enumerate(wide["has_news"].values):
+        if hn == 1:
             last_idx = idx
             days_since.append(0)
         else:
             days_since.append(idx - last_idx if last_idx is not None else np.nan)
-    daily["days_since_news"] = days_since
+    wide["days_since_news"] = days_since
 
-    # V2 section_1/2/3 legacy kolonları — yeni pipeline'da üretilmiyor (NaN)
-    for sec in (1, 2, 3):
-        for suf in ("avg_score", "pos_ratio", "neu_ratio", "neg_ratio", "news_count"):
-            daily[f"section_{sec}_{suf}"] = np.nan
-
-    # Kolon sırasını historical ile hizala
+    # ── 7) Kolon sırasını historical V2 ile hizala ─────────────────────
+    daily = wide.reset_index()
     cols = [
         "date",
         "section_1_avg_score","section_1_pos_ratio","section_1_neu_ratio","section_1_neg_ratio","section_1_news_count",
@@ -817,7 +1071,11 @@ def update_coin(coin: str, lookback_days: int = 30,
         ensemble = NLPEnsemble()
     texts = (news["title"].fillna("") + ". " + news["body"].fillna("")).tolist()
     scores = ensemble.score_batch(texts)
-    scored = pd.concat([news[["date"]].reset_index(drop=True), scores], axis=1)
+    # Section etiketini scored'a taşı — aggregate_daily section-aware
+    scored = pd.concat([
+        news[["date", "section"]].reset_index(drop=True),
+        scores,
+    ], axis=1)
 
     # 4) günlük aggregate (yalnız yeni kısım)
     fill_range = pd.date_range(since, until, freq="D")

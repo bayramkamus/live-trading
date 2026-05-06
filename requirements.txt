@@ -6,6 +6,7 @@ lightgbm>=4.0
 xgboost>=2.0
 requests>=2.31
 feedparser>=6.0       # RSS parse — Atom/ns/content:encoded hepsini düzgün halleder
+beautifulsoup4>=4.12  # TradingView Ideas HTML scraper (sentiment_pipeline.fetch_news_tradingview)
 
 # Web UI (HF Spaces)
 streamlit>=1.30
