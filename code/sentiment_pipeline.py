@@ -55,6 +55,47 @@ USE_CRYPTOCOMPARE = True   # önerilen birincil kaynak
 USE_RSS           = True   # fallback/supplement (sınırsız)
 USE_NEWSAPI       = True   # anahtar varken açık
 USE_CRYPTOPANIC   = False  # ücretsiz tier bitti — kapalı
+USE_TRADINGVIEW   = False  # POC sonucu pozitifse True yap (test_tradingview_scrape.py)
+
+# ============================================================
+# SECTION ETIKETLEMESI
+# ============================================================
+# Historical V2 training datasıyla uyumlu olması için her kaynak bir
+# section'a atanır. aggregate_daily section başına ayrı (avg_score,
+# pos/neu/neg ratio, news_count) hesaplar; combined_score IC-weighted
+# karışımdır (training-time t3_section_weights ile uyumlu).
+#
+#   section 1 — RSS (Coindesk, Cointelegraph, Decrypt vb. editörlü kaynaklar)
+#   section 2 — Haber API'leri (CryptoCompare, NewsAPI, CryptoPanic)
+#   section 3 — TradingView Ideas (community trader analizleri)
+SOURCE_SECTION = {
+    "cryptocompare":     2,
+    "newsapi":           2,
+    "cryptopanic":       2,
+    # RSS feedleri — domain bazlı tüm RSS kaynakları section_1'e gider
+    "coindesk.com":      1,
+    "cointelegraph.com": 1,
+    "decrypt.co":        1,
+    "bitcoinmagazine.com": 1,
+    "cryptoslate.com":   1,
+    "theblock.co":       1,
+    # TradingView Ideas
+    "tradingview_ideas": 3,
+}
+
+
+def _section_for_source(source: str) -> int:
+    """source string'inden section numarasını çıkar. Bilinmeyen → 2 (haber default)."""
+    if not source:
+        return 2
+    s = source.lower().strip()
+    if s in SOURCE_SECTION:
+        return SOURCE_SECTION[s]
+    # RSS kaynakları domain.com formatında geliyor — substring match
+    for key, sec in SOURCE_SECTION.items():
+        if key in s:
+            return sec
+    return 2  # default haber
 
 # RSS kaynakları — crypto odaklı, coin adı ile client-side filtre
 RSS_FEEDS = [
@@ -428,8 +469,9 @@ def fetch_news_rss(coin: str, since: str, until: str,
 def fetch_news(coin: str, since: str, until: str) -> pd.DataFrame:
     """Aktif kaynakları sırayla çağırır, sonuçları birleştirir.
 
-    Sıra: CryptoCompare → RSS → NewsAPI → CryptoPanic (USE_* bayrakları kontrol).
-    Dönüş kolonları: date (YYYY-MM-DD str), title, body, source, url.
+    Sıra: CryptoCompare → RSS → NewsAPI → TradingView (USE_* bayrakları kontrol).
+    Dönüş kolonları: date, title, body, source, url, section.
+    section atama _section_for_source()'tan gelir; SOURCE_SECTION sözlüğüne bak.
     URL tekrarları birleştirme sırasında temizlenir.
     """
     frames = []
@@ -454,13 +496,24 @@ def fetch_news(coin: str, since: str, until: str) -> pd.DataFrame:
         if not cp.empty:
             frames.append(cp)
 
+    if USE_TRADINGVIEW:
+        try:
+            tv = fetch_news_tradingview(coin, since, until)
+            if not tv.empty:
+                frames.append(tv)
+        except NameError:
+            warnings.warn("TradingView fetcher henüz implement edilmedi — atla")
+
     if not frames:
-        return pd.DataFrame(columns=["date", "title", "body", "source", "url"])
+        return pd.DataFrame(columns=["date", "title", "body", "source", "url", "section"])
 
     df = pd.concat(frames, ignore_index=True)
     df = df.drop_duplicates(subset=["url"]).reset_index(drop=True)
     df["_text"] = (df["title"].fillna("") + " " + df["body"].fillna("")).str.strip()
     df = df[df["_text"].str.len() > 10].drop(columns=["_text"]).reset_index(drop=True)
+
+    # Section etiketi — historical V2 schema ile uyumlu (section 1/2/3)
+    df["section"] = df["source"].apply(_section_for_source).astype("int8")
     return df
 
 

@@ -1,0 +1,88 @@
+name: TV Scrape POC
+
+# Manuel tetikleme — TradingView Ideas erişiminin GHA Linux runner IP
+# range'inden çalışıp çalışmadığını test eder. Lokal Windows'tan farklı
+# bir IP ortamı olduğu için ayrı bir validation gerekiyor.
+#
+# Tetikleme:
+#   gh workflow run tv-scrape-poc.yml
+#   gh workflow run tv-scrape-poc.yml -f coins='BTC ETH SOL' -f save_html=true
+# Veya GitHub Actions sekmesinden manuel trigger.
+
+on:
+  workflow_dispatch:
+    inputs:
+      coins:
+        description: 'Coinler (boşlukla ayır)'
+        default: 'BTC ETH SOL XRP ADA'
+        required: false
+        type: string
+      save_html:
+        description: 'HTML snapshot kaydet (artifact olarak)'
+        type: boolean
+        default: false
+      rate_limit:
+        description: 'İstekler arası saniye'
+        default: '2.0'
+        type: string
+
+jobs:
+  poc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install --no-cache-dir requests beautifulsoup4
+
+      - name: Run TV POC
+        id: poc
+        continue-on-error: true
+        run: |
+          python scripts/test_tradingview_scrape.py \
+            --coins ${{ inputs.coins }} \
+            --rate-limit ${{ inputs.rate_limit }} \
+            ${{ inputs.save_html == 'true' && '--save-html' || '' }} \
+            --out tv_poc_results.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tv-poc-results-${{ github.run_id }}
+          path: |
+            tv_poc_results.json
+            html-snapshots/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## TV Scrape POC sonuç" >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          if [ -f tv_poc_results.json ]; then
+            python -c "
+          import json
+          rows = json.load(open('tv_poc_results.json'))
+          ok = sum(1 for r in rows if r.get('status')==200 and not r.get('cloudflare_challenge') and r.get('idea_count',0)>=3)
+          cf = sum(1 for r in rows if r.get('cloudflare_challenge'))
+          err = sum(1 for r in rows if r.get('status') and r.get('status')>=400)
+          print(f'| Metric | Değer |')
+          print(f'|---|---:|')
+          print(f'| Toplam | {len(rows)} |')
+          print(f'| Başarılı | {ok} |')
+          print(f'| CF challenge | {cf} |')
+          print(f'| HTTP error | {err} |')
+          print()
+          print('| Coin | Status | Size | CF | Strategy | Ideas |')
+          print('|---|---:|---:|---:|---|---:|')
+          for r in rows:
+              print(f\"| {r['coin']} | {r.get('status')} | {r.get('size_kb')}KB | {'Y' if r.get('cloudflare_challenge') else 'n'} | {r.get('strategy')} | {r.get('idea_count')} |\")
+          " >> $GITHUB_STEP_SUMMARY
+          fi
