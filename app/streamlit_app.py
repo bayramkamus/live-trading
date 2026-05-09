@@ -1,10 +1,13 @@
 """Streamlit dashboard — HuggingFace Spaces veya yerel kullanım.
 
-Read-only: günlük GitHub Actions job'ının yazdığı SQLite'tan okur.
-3 tab:
+Read-only: günlük GitHub Actions job'ının yazdığı SQLite'tan ve
+data_live/sentiment/{COIN}.parquet'lerden okur.
+5 tab:
     1) Bugünkü sinyaller — 10 coin tablosu, renk kodlu
-    2) Portföy — equity eğrisi, açık pozisyonlar
-    3) İşlem geçmişi — filtrelenebilir
+    2) Duygu sinyalleri — coin başına günlük sentiment + section breakdown
+    3) Portföy — equity eğrisi, açık pozisyonlar
+    4) İşlem geçmişi — filtrelenebilir
+    5) Kararlar — broker_decisions log'u
 
 Çalıştırma:
     streamlit run app/streamlit_app.py
@@ -37,6 +40,7 @@ for p in _candidates:
         sys.path.insert(0, str(p))
 
 from db import DB, DB_PATH  # noqa: E402
+from paths import SENT_DIR, COINS  # noqa: E402
 
 
 # ============================================================
@@ -212,7 +216,119 @@ def tab_signals() -> None:
 
 
 # ============================================================
-# Tab 2 — Portföy
+# Tab 2 — Günlük Duygu Analizi Sinyalleri
+# ============================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_daily_sentiment() -> pd.DataFrame:
+    """Her coinin sentiment parquet'inden SON TAM GÜN satırını çekip birleştirir.
+
+    Bugün UTC kısmi olduğundan (GHA daily-signals sabah 05:12 UTC çalışıyor,
+    sadece o saate kadarki haberler kayıtta) tabloda kısmi sayılar gözüküyordu.
+    Bu sebeple bugün UTC ELENİR ve bir önceki tam UTC günü gösterilir.
+
+    Çıktı kolonları:
+        coin, date, combined_score, section_1_avg_score, section_2_avg_score,
+        section_3_avg_score, section_1_news_count, section_2_news_count,
+        section_3_news_count, total_news_count, combined_pos_ratio,
+        combined_neu_ratio, combined_neg_ratio, has_news, days_since_news
+    """
+    today_utc = pd.Timestamp.utcnow().tz_localize(None).normalize()
+    rows = []
+    for coin in COINS:
+        path = SENT_DIR / f"{coin}.parquet"
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_parquet(path)
+        except Exception:
+            continue
+        if df.empty or "date" not in df.columns:
+            continue
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date")
+        # Bugünü ele — son tam UTC günü kullan
+        df_complete = df[df["date"].dt.normalize() < today_utc]
+        if df_complete.empty:
+            # Bütün satırlar bugünün ise (uç durum) en son satırı al
+            df_complete = df
+        last = df_complete.iloc[-1]
+        rec = {"coin": coin, "date": last["date"]}
+        for col in ("combined_score",
+                    "section_1_avg_score", "section_2_avg_score", "section_3_avg_score",
+                    "section_1_news_count", "section_2_news_count", "section_3_news_count",
+                    "total_news_count",
+                    "combined_pos_ratio", "combined_neu_ratio", "combined_neg_ratio",
+                    "has_news", "days_since_news"):
+            rec[col] = last.get(col)
+        rows.append(rec)
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sentiment_history(coin: str, days: int = 14) -> pd.DataFrame:
+    """Tek coin için son N günün combined_score serisi (mini sparkline için)."""
+    path = SENT_DIR / f"{coin}.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(path)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").tail(days)
+    return df[["date", "combined_score", "total_news_count"]].reset_index(drop=True)
+
+
+def tab_sentiment() -> None:
+    """Her coinin o günkü sentiment skorunu ve section bazlı haber sayısını gösterir."""
+    df = load_daily_sentiment()
+    if df.empty:
+        st.warning("Sentiment verisi bulunamadı.")
+        return
+
+    latest_date = df["date"].max()
+    st.subheader(f"Günlük Duygu Sinyalleri — {latest_date.date()} (son tam gün)")
+    st.caption("S1 = RSS · S2 = CryptoCompare + NewsAPI · S3 = TradingView Ideas · "
+               "Bugün UTC kısmi olduğu için elenir, son tam UTC günü gösterilir.")
+
+    raw = df["combined_score"].astype(float).values
+
+    def _fmt_int(v):
+        try:
+            return f"{int(v)}" if pd.notna(v) else "0"
+        except Exception:
+            return "—"
+
+    show = pd.DataFrame({
+        "Coin":    df["coin"],
+        "Sentiment": [f"{v:+.3f}" if pd.notna(v) else "—" for v in df["combined_score"]],
+        "S1":      [_fmt_int(v) for v in df["section_1_news_count"]],
+        "S2":      [_fmt_int(v) for v in df["section_2_news_count"]],
+        "S3":      [_fmt_int(v) for v in df["section_3_news_count"]],
+        "Toplam":  [_fmt_int(v) for v in df["total_news_count"]],
+    })
+
+    def _color(row):
+        try:
+            v = float(raw[row.name])
+        except Exception:
+            return ["background-color: transparent"] * len(row)
+        if pd.isna(v):
+            return ["background-color: transparent"] * len(row)
+        if v > 0.05:
+            color = "#16a34a22"
+        elif v < -0.05:
+            color = "#dc262622"
+        else:
+            color = "#6b728022"
+        return [f"background-color: {color}"] * len(row)
+
+    st.dataframe(show.style.apply(_color, axis=1),
+                 use_container_width=True, hide_index=True)
+
+
+# ============================================================
+# Tab 3 — Portföy
 # ============================================================
 
 def tab_portfolio() -> None:
@@ -651,17 +767,20 @@ def tab_decisions() -> None:
 
 def main() -> None:
     header()
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Bugünkü sinyaller",
-                                       "💼 Portföy",
-                                       "📜 Geçmiş",
-                                       "📋 Kararlar"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Bugünkü sinyaller",
+                                             "🎯 Duygu sinyalleri",
+                                             "💼 Portföy",
+                                             "📜 Geçmiş",
+                                             "📋 Kararlar"])
     with tab1:
         tab_signals()
     with tab2:
-        tab_portfolio()
+        tab_sentiment()
     with tab3:
-        tab_history()
+        tab_portfolio()
     with tab4:
+        tab_history()
+    with tab5:
         tab_decisions()
 
     with st.sidebar:

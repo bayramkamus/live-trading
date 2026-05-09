@@ -1,9 +1,13 @@
 name: daily-signals
 
 on:
-  # her gün 02:10 UTC (Binance/FRED close sonrası güvenli pencere)
+  # her gün 23:00 UTC — günün sentiment penceresinin %96'sı kapanmadan önce yakalansın diye.
+  # Binance bugün 1d candle'ı 00:00 UTC'de kapanır, henüz kapanmadığı için sistem
+  # 'incomplete-candle' filter ile drop eder ve dünün tam mumı kullanılır.
+  # Signal: dün features → bugün+1 forward return prediction. Trader gece uyumadan
+  # veya sabah uyandığında signal hazır.
   schedule:
-    - cron: "10 2 * * *"
+    - cron: "0 23 * * *"
   # elle tetikleme
   workflow_dispatch:
     inputs:
