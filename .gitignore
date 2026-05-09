@@ -24,13 +24,14 @@ news_debug.log
 
 logs/signals_*.csv
 
-# A4: replay broker, ge�ici dosyalar
+# A4: replay broker, ge�ici dosyalar
 data_live/broker_replay/
 data_live/broker/state.bak.json
 logs/daily_*.log
 data_live/.fuse_hidden*
 
-# Production artifact yedekleri � repo'ya alm�yoruz
+# Production artifact yedekleri - repo'ya almıyoruz
 artifacts/v4_production.bak_*/
 
-artifacts/v4_production.bak_*/
+# Staj dökümanları (lokal arşiv, repo'ya alınmıyor)
+docs/
