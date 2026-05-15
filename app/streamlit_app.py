@@ -19,6 +19,7 @@ HF Spaces'te:
 """
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,7 +41,7 @@ for p in _candidates:
         sys.path.insert(0, str(p))
 
 from db import DB, DB_PATH  # noqa: E402
-from paths import SENT_DIR, COINS  # noqa: E402
+from paths import COINS  # noqa: E402
 
 
 # ============================================================
@@ -219,9 +220,22 @@ def tab_signals() -> None:
 # Tab 2 — Günlük Duygu Analizi Sinyalleri
 # ============================================================
 
+_SENT_COLS = (
+    "combined_score",
+    "section_1_avg_score", "section_2_avg_score", "section_3_avg_score",
+    "section_1_news_count", "section_2_news_count", "section_3_news_count",
+    "total_news_count",
+    "combined_pos_ratio", "combined_neu_ratio", "combined_neg_ratio",
+    "has_news", "days_since_news",
+)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_daily_sentiment() -> pd.DataFrame:
-    """Her coinin sentiment parquet'inden SON TAM GÜN satırını çekip birleştirir.
+    """Her coinin sent_cache (app.db) tablosundan SON TAM GÜN satırını çekip birleştirir.
+
+    Veri kaynağı: app.db içindeki sent_cache tablosu (coin, date, payload JSON).
+    Parquet'ler HF Space deploy paketine girmediği için DB tek doğru kaynak.
 
     Bugün UTC kısmi olduğundan (GHA daily-signals sabah 05:12 UTC çalışıyor,
     sadece o saate kadarki haberler kayıtta) tabloda kısmi sayılar gözüküyordu.
@@ -234,34 +248,34 @@ def load_daily_sentiment() -> pd.DataFrame:
         combined_neu_ratio, combined_neg_ratio, has_news, days_since_news
     """
     today_utc = pd.Timestamp.utcnow().tz_localize(None).normalize()
+    today_str = today_utc.strftime("%Y-%m-%d")
     rows = []
-    for coin in COINS:
-        path = SENT_DIR / f"{coin}.parquet"
-        if not path.exists():
-            continue
-        try:
-            df = pd.read_parquet(path)
-        except Exception:
-            continue
-        if df.empty or "date" not in df.columns:
-            continue
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date")
-        # Bugünü ele — son tam UTC günü kullan
-        df_complete = df[df["date"].dt.normalize() < today_utc]
-        if df_complete.empty:
-            # Bütün satırlar bugünün ise (uç durum) en son satırı al
-            df_complete = df
-        last = df_complete.iloc[-1]
-        rec = {"coin": coin, "date": last["date"]}
-        for col in ("combined_score",
-                    "section_1_avg_score", "section_2_avg_score", "section_3_avg_score",
-                    "section_1_news_count", "section_2_news_count", "section_3_news_count",
-                    "total_news_count",
-                    "combined_pos_ratio", "combined_neu_ratio", "combined_neg_ratio",
-                    "has_news", "days_since_news"):
-            rec[col] = last.get(col)
-        rows.append(rec)
+    with DB() as db:
+        db.init()
+        for coin in COINS:
+            # Bugünü ele — son tam UTC günü kullan
+            row = db.conn.execute(
+                "SELECT date, payload FROM sent_cache "
+                "WHERE coin=? AND date<? ORDER BY date DESC LIMIT 1",
+                (coin, today_str),
+            ).fetchone()
+            if row is None:
+                # Bütün satırlar bugünün ise (uç durum) en son satırı al
+                row = db.conn.execute(
+                    "SELECT date, payload FROM sent_cache "
+                    "WHERE coin=? ORDER BY date DESC LIMIT 1",
+                    (coin,),
+                ).fetchone()
+            if row is None:
+                continue
+            try:
+                payload = json.loads(row["payload"])
+            except Exception:
+                continue
+            rec = {"coin": coin, "date": pd.to_datetime(row["date"])}
+            for col in _SENT_COLS:
+                rec[col] = payload.get(col)
+            rows.append(rec)
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
@@ -269,14 +283,34 @@ def load_daily_sentiment() -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_sentiment_history(coin: str, days: int = 14) -> pd.DataFrame:
-    """Tek coin için son N günün combined_score serisi (mini sparkline için)."""
-    path = SENT_DIR / f"{coin}.parquet"
-    if not path.exists():
+    """Tek coin için son N günün combined_score serisi (mini sparkline için).
+
+    Veri kaynağı: app.db içindeki sent_cache tablosu.
+    """
+    with DB() as db:
+        db.init()
+        rows = db.conn.execute(
+            "SELECT date, payload FROM sent_cache "
+            "WHERE coin=? ORDER BY date DESC LIMIT ?",
+            (coin, int(days)),
+        ).fetchall()
+    if not rows:
         return pd.DataFrame()
-    df = pd.read_parquet(path)
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date").tail(days)
-    return df[["date", "combined_score", "total_news_count"]].reset_index(drop=True)
+    out = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"])
+        except Exception:
+            continue
+        out.append({
+            "date": pd.to_datetime(r["date"]),
+            "combined_score": payload.get("combined_score"),
+            "total_news_count": payload.get("total_news_count"),
+        })
+    df = pd.DataFrame(out)
+    if df.empty:
+        return df
+    return df.sort_values("date").reset_index(drop=True)
 
 
 def tab_sentiment() -> None:
