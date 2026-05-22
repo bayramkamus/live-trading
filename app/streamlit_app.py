@@ -59,25 +59,40 @@ st.set_page_config(
 # Data loaders (cached)
 # ============================================================
 
+
+def _use_decision_date(df):
+    """Dashboard 'date' kolonunu karar gunune (decision_date) esler.
+
+    Ham tarih raw_date olarak korunur; decision_date yoksa date korunur.
+    Boylece tum sekmeler, grafikler ve filtreler karar gununu kullanir.
+    Duygu sinyalleri sekmesi bu yoldan gecmez (kendi tarih mantigi var).
+    """
+    if not df.empty and "decision_date" in df.columns:
+        df = df.copy()
+        df["raw_date"] = df["date"]
+        df["date"] = df["decision_date"].fillna(df["date"])
+    return df
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def load_signals(days: int = 30) -> pd.DataFrame:
     with DB() as db:
         db.init()
-        return db.read_signals(days=days)
+        return _use_decision_date(db.read_signals(days=days))
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_trades(days: int | None = None) -> pd.DataFrame:
     with DB() as db:
         db.init()
-        return db.read_trades(days=days)
+        return _use_decision_date(db.read_trades(days=days))
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_equity(days: int | None = None) -> pd.DataFrame:
     with DB() as db:
         db.init()
-        return db.read_equity(days=days)
+        return _use_decision_date(db.read_equity(days=days))
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -115,7 +130,7 @@ def load_decisions(days: int = 30) -> pd.DataFrame:
     """A5.2: broker_decisions tablosundan kararlari oku."""
     with DB() as db:
         db.init()
-        return db.read_decisions(days=days)
+        return _use_decision_date(db.read_decisions(days=days))
 
 
 # ============================================================
@@ -127,7 +142,9 @@ def header() -> None:
     col1.title("📈 V4 Crypto Signals")
 
     last_run = load_meta("last_run") or "—"
-    last_date = load_meta("last_date") or "—"
+    _sig_hdr = load_signals(days=400)
+    last_date = (str(_sig_hdr["date"].max())
+                 if not _sig_hdr.empty else (load_meta("last_date") or "—"))
     last_mv = load_meta("last_model_version") or "—"
     last_mca = load_meta("last_model_created_at") or ""
 

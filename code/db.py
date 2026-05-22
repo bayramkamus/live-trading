@@ -174,6 +174,8 @@ class DB:
                 self.conn.executescript(s + ";")
         # A4: idempotent migration - signals tablosuna yeni kolonlar
         self._migrate_signals_columns()
+        # decision_date: dashboard karar gunu tarih semantigi
+        self._migrate_decision_date()
 
     def _migrate_signals_columns(self) -> None:
         """Mevcut signals tablosuna eksik kolonlari ekle (A4)."""
@@ -193,6 +195,39 @@ class DB:
         for name, typ in new_cols:
             if name not in existing:
                 self.conn.execute(f"ALTER TABLE signals ADD COLUMN {name} {typ}")
+
+    def _migrate_decision_date(self) -> None:
+        """decision_date kolonu + tek seferlik idempotent backfill.
+
+        Dashboard 'karar gunu' (decision_date) gosterir; ham date/fill_date
+        DB'de korunur.  decision_date = fill_date + 1 gun
+        (fill_date yoksa legacy icin date + 2 gun; trades/equity icin
+        date zaten fill gunudur -> date + 1 gun).
+        """
+        for tbl in ("signals", "broker_decisions", "trades", "equity"):
+            cur = self.conn.execute(f"PRAGMA table_info({tbl})")
+            cols = {row["name"] for row in cur.fetchall()}
+            if "decision_date" not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE {tbl} ADD COLUMN decision_date TEXT")
+        # backfill: yalniz NULL satirlar -> idempotent, ilk doldurustan
+        # sonra her cagride 0 satir gunceller.
+        try:
+            self.conn.execute(
+                "UPDATE signals SET decision_date = "
+                "COALESCE(date(fill_date,'+1 day'), date(date,'+2 days')) "
+                "WHERE decision_date IS NULL")
+            self.conn.execute(
+                "UPDATE broker_decisions SET decision_date = "
+                "date(date,'+2 days') WHERE decision_date IS NULL")
+            self.conn.execute(
+                "UPDATE trades SET decision_date = "
+                "date(date,'+1 day') WHERE decision_date IS NULL")
+            self.conn.execute(
+                "UPDATE equity SET decision_date = "
+                "date(date,'+1 day') WHERE decision_date IS NULL")
+        except sqlite3.OperationalError:
+            pass  # salt-okunur DB - dashboard ham tarihe duser
 
     # ------------- meta --------------
     def get_meta(self, k: str, default: Optional[str] = None) -> Optional[str]:
@@ -281,7 +316,7 @@ class DB:
     def read_decisions(self, days: int = 30) -> pd.DataFrame:
         cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat()
         return pd.read_sql_query(
-            "SELECT * FROM broker_decisions WHERE date>=? "
+            "SELECT * FROM broker_decisions WHERE COALESCE(decision_date,date)>=? "
             "ORDER BY date DESC, coin ASC",
             self.conn, params=(cutoff,),
         )
@@ -289,7 +324,7 @@ class DB:
     def read_signals(self, days: int = 30) -> pd.DataFrame:
         cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat()
         return pd.read_sql_query(
-            "SELECT * FROM signals WHERE date>=? ORDER BY date DESC, coin ASC",
+            "SELECT * FROM signals WHERE COALESCE(decision_date,date)>=? ORDER BY date DESC, coin ASC",
             self.conn, params=(cutoff,),
         )
 
@@ -333,7 +368,7 @@ class DB:
         where, params = [], []
         if days is not None:
             cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat()
-            where.append("date>=?"); params.append(cutoff)
+            where.append("COALESCE(decision_date,date)>=?"); params.append(cutoff)
         if coin:
             where.append("coin=?"); params.append(coin)
         if where:
@@ -346,7 +381,7 @@ class DB:
         params = ()
         if days is not None:
             cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat()
-            q += " WHERE date>=?"
+            q += " WHERE COALESCE(decision_date,date)>=?"
             params = (cutoff,)
         q += " ORDER BY date ASC"
         return pd.read_sql_query(q, self.conn, params=params)
