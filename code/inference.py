@@ -23,6 +23,37 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+# --- XGBoost support (added for XGBoost production model) ---
+try:
+    import xgboost as _xgb
+except Exception:
+    _xgb = None
+
+class _XGBModel:
+    """Adapter so XGBoost matches the LightGBM .predict(x)->(n,3) interface."""
+    def __init__(self, booster, best_iter):
+        self._b = booster
+        self._ir = (0, int(best_iter) + 1)
+    def predict(self, x, *a, **k):
+        return self._b.predict(_xgb.DMatrix(x), iteration_range=self._ir)
+
+def _load_model(coin_dir):
+    from pathlib import Path as _P
+    coin_dir = _P(coin_dir)
+    xgb_path = coin_dir / "model.xgb"
+    if xgb_path.exists():
+        meta = {}
+        mp = coin_dir / "model_meta.json"
+        if mp.exists():
+            meta = json.loads(mp.read_text())
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            b = _xgb.Booster(); b.load_model(str(xgb_path))
+        return _XGBModel(b, meta.get("best_iteration", 0))
+    return lgb.Booster(model_file=str(coin_dir / "model.lgb"))
+# --- end XGBoost support ---
+
 
 from paths import ARTIFACTS_ROOT, COINS
 from feature_builders import (
@@ -37,7 +68,7 @@ def load_coin_artifacts(coin: str) -> dict:
     if not coin_dir.exists():
         raise FileNotFoundError(f"{coin} artifact klasörü yok: {coin_dir}")
 
-    model      = lgb.Booster(model_file=str(coin_dir / "model.lgb"))
+    model = _load_model(coin_dir)
     thresholds = json.loads((coin_dir / "thresholds.json").read_text())
     horizons   = json.loads((coin_dir / "horizons.json").read_text())
     quantiles  = json.loads((coin_dir / "label_quantiles.json").read_text())

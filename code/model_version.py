@@ -38,19 +38,21 @@ def get_model_version(coin: str) -> Dict[str, Optional[str]]:
     """
     coin_dir = ARTIFACTS_ROOT / coin
     out: Dict[str, Optional[str]] = {
-        "artifact_hash": None, "created_at": None, "feature_set": None,
+        "artifact_hash": None, "created_at": None, "feature_set": None, "model_type": None,
     }
     if not coin_dir.exists():
         return out
 
     h = hashlib.sha256()
-    for fname in ("model.lgb", "feature_columns.json"):
+    model_file = "model.xgb" if (coin_dir / "model.xgb").exists() else "model.lgb"
+    for fname in (model_file, "feature_columns.json"):
         p = coin_dir / fname
         if p.exists():
             with p.open("rb") as f:
                 for chunk in iter(lambda: f.read(65536), b""):
                     h.update(chunk)
     out["artifact_hash"] = h.hexdigest()[:12]
+    out["model_type"] = "xgboost" if model_file == "model.xgb" else "lightgbm"
 
     # Production metadata — uretim klasorunun ust dizininde
     meta_path = ARTIFACTS_ROOT / "production_metadata.json"

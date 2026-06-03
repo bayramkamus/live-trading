@@ -1,26 +1,30 @@
 {
-  "created_at": "2026-05-06T12:14:31.005543Z",
-  "feature_set": "all (sent+macro+tech). NLP head: jhartmann-only (winner of V4 nlp_combo_ablation on S1 \u2014 port Sharpe +1.38, return +183%, alpha vs BH +193 pp)",
+  "created_by": "train_xgb_prod.py",
+  "model_type": "xgboost",
+  "feature_set": "all (sent+macro+tech)",
+  "horizon_source": "train-only Spearman IC (per-coin, leakage fix #1)",
+  "label_source": "train-only quantile 30/70 of forward log-return",
+  "threshold_source": "val Sharpe on 5x5 (buy_th,sell_th) grid",
   "train_end": "2025-12-31",
   "val_start": "2026-01-01",
   "val_end": "2026-04-15",
-  "horizon_source": "train-only Spearman IC on equal-weighted combined sentiment (leakage fix #1)",
-  "label_source": "train-only quantile 30/70 of forward log-return (no leakage)",
-  "threshold_source": "val Sharpe on 5x5 grid of (buy_th, sell_th) in [0.30..0.50] (leakage fix #2)",
-  "fee_bps_per_side": 10.0,
-  "lgb_params": {
-    "objective": "multiclass",
+  "xgb_params": {
+    "objective": "multi:softprob",
     "num_class": 3,
-    "learning_rate": 0.03,
-    "num_leaves": 31,
-    "min_data_in_leaf": 30,
-    "feature_fraction": 0.9,
-    "bagging_fraction": 0.9,
-    "bagging_freq": 5,
-    "lambda_l2": 1.0,
-    "verbose": -1
+    "eval_metric": "mlogloss",
+    "learning_rate": 0.05,
+    "max_depth": 6,
+    "min_child_weight": 1.0,
+    "subsample": 0.85,
+    "colsample_bytree": 0.85,
+    "reg_alpha": 0.0,
+    "reg_lambda": 1.0,
+    "tree_method": "hist",
+    "seed": 42,
+    "verbosity": 0
   },
-  "n_coins": 10,
+  "num_boost_round": 400,
+  "early_stopping_rounds": 40,
   "coins": [
     "BTC",
     "ETH",
@@ -33,6 +37,5 @@
     "LINK",
     "LTC"
   ],
-  "early_stopping_rounds": 100,
-  "num_boost_round_max": 600
+  "created_at": "2026-06-03T12:53:43.950916+00:00"
 }

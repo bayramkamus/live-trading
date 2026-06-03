@@ -1,0 +1,8 @@
+{
+  "model_type": "xgboost",
+  "best_iteration": 0,
+  "iteration_range": [
+    0,
+    1
+  ]
+}
